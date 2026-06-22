@@ -379,19 +379,20 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
     """Connect to VPS via SSH and run the install command."""
     try:
-        # Build the install script
+        # Build the install script content
         if data["os_type"] == "windows":
             install_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -firmware"
         else:
             install_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -pwd 'password123' -firmware"
 
-        # Create a script file on VPS, then execute it
         script_content = (
             "#!/bin/bash\n"
+            "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
+            "cd /tmp\n"
             "wget --no-check-certificate -qO /tmp/InstallNET.sh "
             "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh'\n"
             "chmod a+x /tmp/InstallNET.sh\n"
-            f"yes | {install_cmd}\n"
+            f"{install_cmd} <<< 'y'\n"
         )
 
         # Connect via SSH
@@ -407,26 +408,27 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
             look_for_keys=False,
         )
 
-        # Write script to VPS
+        # Write script to VPS via SFTP
         sftp = ssh.open_sftp()
         with sftp.file('/tmp/do_reinstall.sh', 'w') as f:
             f.write(script_content)
         sftp.close()
 
-        # Execute all in one command to avoid timing issues
-        stdin, stdout, stderr = ssh.exec_command(
-            "chmod +x /tmp/do_reinstall.sh && "
-            "nohup bash /tmp/do_reinstall.sh > /tmp/reinstall.log 2>&1 & "
-            "sleep 3 && cat /tmp/reinstall.log | tail -5"
+        # Execute: chmod + run in background using screen or disown
+        channel = ssh.get_transport().open_session()
+        channel.exec_command(
+            "chmod +x /tmp/do_reinstall.sh; "
+            "setsid bash /tmp/do_reinstall.sh > /tmp/reinstall.log 2>&1 < /dev/null &"
         )
 
-        # Wait and get output to verify it started
+        # Wait for download and script to begin
         await asyncio.sleep(15)
+
+        # Check if script file was downloaded
+        stdin, stdout, stderr = ssh.exec_command("ls -la /tmp/InstallNET.sh 2>&1; echo '---'; cat /tmp/reinstall.log 2>&1 | tail -10")
+        await asyncio.sleep(3)
         output = stdout.read().decode('utf-8', errors='ignore')
-        error = stderr.read().decode('utf-8', errors='ignore')
-        logger.info(f"Install output: {output}")
-        if error:
-            logger.info(f"Install stderr: {error}")
+        logger.info(f"Install check: {output}")
 
         ssh.close()
         return True
