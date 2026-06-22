@@ -49,6 +49,7 @@ rm -rf /opt/reinstallos
 git clone https://github.com/xyzval/reinstallos.git /opt/reinstallos > /dev/null 2>&1
 
 echo -e "${GREEN}[3/6] Menginstall Python packages...${NC}"
+pip3 install --break-system-packages -q python-telegram-bot==21.6 paramiko==3.5.0 python-dotenv==1.0.1 > /dev/null 2>&1 || \
 pip3 install -q python-telegram-bot==21.6 paramiko==3.5.0 python-dotenv==1.0.1 > /dev/null 2>&1
 
 echo -e "${GREEN}[4/6] Membuat konfigurasi...${NC}"
