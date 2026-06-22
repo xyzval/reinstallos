@@ -79,12 +79,8 @@ def is_authorized(user_id: int) -> bool:
 def parse_vps_detail(text: str) -> dict:
     """
     Parse VPS detail dari 1 pesan.
-    Format yang diterima:
-      ip password
-      ip port password
-      ip port username password
-      ip:port password
-      ip:port username password
+    Format: ip user port password
+    Contoh: 209.74.81.155 root 22 password123
     """
     text = text.strip()
     parts = text.split()
@@ -96,52 +92,16 @@ def parse_vps_detail(text: str) -> dict:
         "vps_pass": "",
     }
 
-    if len(parts) < 2:
+    if len(parts) != 4:
         return None
 
-    # Check if first part contains ip:port
-    if ":" in parts[0]:
-        ip_port = parts[0].split(":")
-        result["vps_ip"] = ip_port[0]
-        try:
-            result["vps_port"] = int(ip_port[1])
-        except ValueError:
-            result["vps_port"] = 22
-
-        if len(parts) == 2:
-            # ip:port password
-            result["vps_pass"] = parts[1]
-        elif len(parts) == 3:
-            # ip:port username password
-            result["vps_user"] = parts[1]
-            result["vps_pass"] = parts[2]
-        else:
-            return None
-    else:
-        result["vps_ip"] = parts[0]
-
-        if len(parts) == 2:
-            # ip password
-            result["vps_pass"] = parts[1]
-        elif len(parts) == 3:
-            # ip port password
-            try:
-                result["vps_port"] = int(parts[1])
-                result["vps_pass"] = parts[2]
-            except ValueError:
-                # ip username password
-                result["vps_user"] = parts[1]
-                result["vps_pass"] = parts[2]
-        elif len(parts) == 4:
-            # ip port username password
-            try:
-                result["vps_port"] = int(parts[1])
-            except ValueError:
-                result["vps_port"] = 22
-            result["vps_user"] = parts[2]
-            result["vps_pass"] = parts[3]
-        else:
-            return None
+    result["vps_ip"] = parts[0]
+    result["vps_user"] = parts[1]
+    try:
+        result["vps_port"] = int(parts[2])
+    except ValueError:
+        return None
+    result["vps_pass"] = parts[3]
 
     return result
 
@@ -156,15 +116,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "Reinstall OS Bot - by xyzval\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Kirim detail VPS kamu dengan format:\n\n"
-        "`ip password`\n"
-        "`ip port password`\n"
-        "`ip port username password`\n\n"
-        "Contoh kirim seperti ini:\n\n"
-        "`103.1.2.3 MyPassword123`\n\n"
-        "atau\n\n"
-        "`103.1.2.3 22 root MyPassword123`\n\n"
-        "Tinggal copy, ganti dengan detail VPS kamu, lalu kirim.",
+        "Kirim detail VPS dengan format:\n\n"
+        "`ip user port password`\n\n"
+        "Contoh:\n"
+        "`209.74.81.155 root 22 password123`",
         parse_mode="Markdown",
     )
     return VPS_DETAIL
@@ -179,11 +134,11 @@ async def get_vps_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data is None:
         await update.message.reply_text(
-            "Format salah! Kirim ulang dengan format:\n\n"
-            "  ip password\n"
-            "  ip port password\n"
-            "  ip port username password\n\n"
-            "Contoh: 103.1.2.3 MyPassword123"
+            "Format salah\\! Kirim ulang dengan format:\n\n"
+            "`ip user port password`\n\n"
+            "Contoh:\n"
+            "`209.74.81.155 root 22 password123`",
+            parse_mode="Markdown",
         )
         return VPS_DETAIL
 
