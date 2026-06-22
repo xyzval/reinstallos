@@ -491,7 +491,8 @@ def main() -> None:
             SELECT_LANG: [CallbackQueryHandler(select_lang, pattern="^lang_")],
             CONFIRM: [CallbackQueryHandler(confirm_install, pattern="^confirm_")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        allow_reentry=True,
     )
 
     app.add_handler(conv_handler)
