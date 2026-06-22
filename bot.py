@@ -361,22 +361,22 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "Gunakan /start untuk reinstall lagi."
             )
     else:
+        error_msg = data.get("error_msg", "Unknown error")
         await query.edit_message_text(
             "GAGAL!\n"
             "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "Tidak bisa terhubung ke VPS.\n"
-            "Pastikan:\n"
-            "- IP benar\n"
-            "- Port SSH benar\n"
-            "- Username & password benar\n"
-            "- VPS online\n\n"
+            f"Error: {error_msg}\n\n"
+            f"Detail koneksi:\n"
+            f"  IP: {data['vps_ip']}\n"
+            f"  Port: {data['vps_port']}\n"
+            f"  User: {data['vps_user']}\n\n"
             "Gunakan /start untuk coba lagi."
         )
 
     return ConversationHandler.END
 
 
-async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict) -> bool:
+async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
     """Connect to VPS via SSH and run the install command."""
     try:
         # Build the install command
@@ -404,6 +404,8 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict) -> 
             username=data["vps_user"],
             password=data["vps_pass"],
             timeout=30,
+            allow_agent=False,
+            look_for_keys=False,
         )
 
         # Execute command (non-blocking, because VPS will reboot)
@@ -417,7 +419,20 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict) -> 
         ssh.close()
         return True
 
+    except paramiko.AuthenticationException:
+        context.user_data["error_msg"] = "Username atau password salah"
+        logger.error("SSH Auth Error: Authentication failed")
+        return False
+    except paramiko.ssh_exception.NoValidConnectionsError as e:
+        context.user_data["error_msg"] = f"Port {data['vps_port']} tidak bisa diakses"
+        logger.error(f"SSH Connection Error: {e}")
+        return False
+    except TimeoutError:
+        context.user_data["error_msg"] = "Timeout - VPS tidak merespon (offline?)"
+        logger.error("SSH Timeout Error")
+        return False
     except Exception as e:
+        context.user_data["error_msg"] = str(e)
         logger.error(f"SSH Error: {e}")
         return False
 
