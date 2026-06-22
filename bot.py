@@ -79,11 +79,10 @@ def is_authorized(user_id: int) -> bool:
 def parse_vps_detail(text: str) -> dict:
     """
     Parse VPS detail dari 1 pesan.
-    Format: ip user port password
-    Contoh: 209.74.81.155 root 22 password123
+    Format: ip:port@user:password
+    Contoh: 209.74.81.155:22@root:password123
     """
     text = text.strip()
-    parts = text.split()
 
     result = {
         "vps_ip": "",
@@ -92,18 +91,37 @@ def parse_vps_detail(text: str) -> dict:
         "vps_pass": "",
     }
 
-    if len(parts) != 4:
-        return None
-
-    result["vps_ip"] = parts[0]
-    result["vps_user"] = parts[1]
     try:
-        result["vps_port"] = int(parts[2])
-    except ValueError:
-        return None
-    result["vps_pass"] = parts[3]
+        # Split by @ -> [ip:port, user:password]
+        if "@" not in text:
+            return None
 
-    return result
+        connection, login = text.split("@", 1)
+
+        # Parse ip:port
+        if ":" in connection:
+            ip, port = connection.rsplit(":", 1)
+            result["vps_ip"] = ip
+            result["vps_port"] = int(port)
+        else:
+            result["vps_ip"] = connection
+            result["vps_port"] = 22
+
+        # Parse user:password
+        if ":" in login:
+            user, password = login.split(":", 1)
+            result["vps_user"] = user
+            result["vps_pass"] = password
+        else:
+            return None
+
+        if not result["vps_ip"] or not result["vps_pass"]:
+            return None
+
+        return result
+
+    except (ValueError, IndexError):
+        return None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -117,9 +135,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Reinstall OS Bot - by xyzval\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "Kirim detail VPS dengan format:\n\n"
-        "`ip user port password`\n\n"
+        "`ip:port@user:password`\n\n"
         "Contoh:\n"
-        "`209.74.81.155 root 22 password123`",
+        "`209.74.81.155:22@root:password123`",
         parse_mode="Markdown",
     )
     return VPS_DETAIL
@@ -134,10 +152,10 @@ async def get_vps_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data is None:
         await update.message.reply_text(
-            "Format salah\\! Kirim ulang dengan format:\n\n"
-            "`ip user port password`\n\n"
+            "Format salah! Kirim ulang dengan format:\n\n"
+            "`ip:port@user:password`\n\n"
             "Contoh:\n"
-            "`209.74.81.155 root 22 password123`",
+            "`209.74.81.155:22@root:password123`",
             parse_mode="Markdown",
         )
         return VPS_DETAIL
