@@ -4,7 +4,7 @@ Telegram Bot - Reinstall OS
 by xyzval
 
 Bot Telegram untuk reinstall VPS ke Windows/Linux secara otomatis.
-Kirim detail VPS (IP, username, password) dan pilih OS, bot akan menginstall otomatis.
+Kirim detail VPS dalam 1 pesan, pilih OS, bot akan menginstall otomatis.
 """
 
 import os
@@ -37,7 +37,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "").split(",")
 
 # Conversation states
-VPS_IP, VPS_PORT, VPS_USER, VPS_PASS, SELECT_OS, SELECT_LANG, CONFIRM = range(7)
+VPS_DETAIL, SELECT_OS, SELECT_LANG, CONFIRM = range(4)
 
 # OS Options
 WINDOWS_OPTIONS = {
@@ -76,6 +76,76 @@ def is_authorized(user_id: int) -> bool:
     return str(user_id) in ALLOWED_USERS
 
 
+def parse_vps_detail(text: str) -> dict:
+    """
+    Parse VPS detail dari 1 pesan.
+    Format yang diterima:
+      ip password
+      ip port password
+      ip port username password
+      ip:port password
+      ip:port username password
+    """
+    text = text.strip()
+    parts = text.split()
+
+    result = {
+        "vps_ip": "",
+        "vps_port": 22,
+        "vps_user": "root",
+        "vps_pass": "",
+    }
+
+    if len(parts) < 2:
+        return None
+
+    # Check if first part contains ip:port
+    if ":" in parts[0]:
+        ip_port = parts[0].split(":")
+        result["vps_ip"] = ip_port[0]
+        try:
+            result["vps_port"] = int(ip_port[1])
+        except ValueError:
+            result["vps_port"] = 22
+
+        if len(parts) == 2:
+            # ip:port password
+            result["vps_pass"] = parts[1]
+        elif len(parts) == 3:
+            # ip:port username password
+            result["vps_user"] = parts[1]
+            result["vps_pass"] = parts[2]
+        else:
+            return None
+    else:
+        result["vps_ip"] = parts[0]
+
+        if len(parts) == 2:
+            # ip password
+            result["vps_pass"] = parts[1]
+        elif len(parts) == 3:
+            # ip port password
+            try:
+                result["vps_port"] = int(parts[1])
+                result["vps_pass"] = parts[2]
+            except ValueError:
+                # ip username password
+                result["vps_user"] = parts[1]
+                result["vps_pass"] = parts[2]
+        elif len(parts) == 4:
+            # ip port username password
+            try:
+                result["vps_port"] = int(parts[1])
+            except ValueError:
+                result["vps_port"] = 22
+            result["vps_user"] = parts[2]
+            result["vps_pass"] = parts[3]
+        else:
+            return None
+
+    return result
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Start command - begin the conversation."""
     user_id = update.effective_user.id
@@ -86,53 +156,42 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "Reinstall OS Bot - by xyzval\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Bot ini akan menginstall Windows/Linux di VPS kamu secara otomatis.\n\n"
-        "PERINGATAN: Semua data di VPS akan DIHAPUS!\n\n"
-        "Masukkan IP VPS kamu:"
+        "Kirim detail VPS dalam 1 pesan:\n\n"
+        "Format:\n"
+        "  ip password\n"
+        "  ip port password\n"
+        "  ip port username password\n\n"
+        "Contoh:\n"
+        "  103.1.2.3 MyPassword123\n"
+        "  103.1.2.3 22 MyPassword123\n"
+        "  103.1.2.3 22 root MyPassword123\n"
+        "  103.1.2.3:2222 root MyPassword123\n\n"
+        "Default: port=22, username=root"
     )
-    return VPS_IP
+    return VPS_DETAIL
 
 
-async def get_vps_ip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Get VPS IP address."""
-    ip = update.message.text.strip()
-    context.user_data["vps_ip"] = ip
-    await update.message.reply_text(
-        f"IP: {ip}\n\n"
-        "Masukkan SSH Port (default: 22):"
-    )
-    return VPS_PORT
+async def get_vps_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Parse VPS detail from single message."""
+    text = update.message.text.strip()
 
+    # Parse the detail
+    data = parse_vps_detail(text)
 
-async def get_vps_port(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Get VPS SSH port."""
-    port_text = update.message.text.strip()
-    port = int(port_text) if port_text.isdigit() else 22
-    context.user_data["vps_port"] = port
-    await update.message.reply_text(
-        f"Port: {port}\n\n"
-        "Masukkan SSH Username (default: root):"
-    )
-    return VPS_USER
+    if data is None:
+        await update.message.reply_text(
+            "Format salah! Kirim ulang dengan format:\n\n"
+            "  ip password\n"
+            "  ip port password\n"
+            "  ip port username password\n\n"
+            "Contoh: 103.1.2.3 MyPassword123"
+        )
+        return VPS_DETAIL
 
+    # Store data
+    context.user_data.update(data)
 
-async def get_vps_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Get VPS SSH username."""
-    username = update.message.text.strip() or "root"
-    context.user_data["vps_user"] = username
-    await update.message.reply_text(
-        f"Username: {username}\n\n"
-        "Masukkan SSH Password:"
-    )
-    return VPS_PASS
-
-
-async def get_vps_pass(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Get VPS SSH password and show OS menu."""
-    password = update.message.text.strip()
-    context.user_data["vps_pass"] = password
-
-    # Delete password message for security
+    # Delete message for security (contains password)
     try:
         await update.message.delete()
     except Exception:
@@ -146,11 +205,11 @@ async def get_vps_pass(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        "Detail VPS tersimpan.\n\n"
-        f"IP: {context.user_data['vps_ip']}\n"
-        f"Port: {context.user_data['vps_port']}\n"
-        f"User: {context.user_data['vps_user']}\n"
-        f"Pass: {'*' * len(password)}\n\n"
+        "VPS tersimpan!\n\n"
+        f"  IP   : {data['vps_ip']}\n"
+        f"  Port : {data['vps_port']}\n"
+        f"  User : {data['vps_user']}\n"
+        f"  Pass : {'*' * len(data['vps_pass'])}\n\n"
         "Pilih kategori OS:",
         reply_markup=reply_markup,
     )
@@ -268,7 +327,7 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
         summary += (
             "\nLogin setelah selesai:\n"
             f"  SSH: root@{data['vps_ip']}\n"
-            "  Password: yang kamu set / password123\n"
+            "  Password: password123\n"
         )
 
     summary += (
@@ -293,7 +352,7 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
 
     if query.data == "confirm_no":
-        await query.edit_message_text("Instalasi dibatalkan.")
+        await query.edit_message_text("Instalasi dibatalkan.\n\nGunakan /start untuk mulai lagi.")
         return ConversationHandler.END
 
     # Start installation
@@ -317,7 +376,8 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"  RDP Host: {data['vps_ip']}:3389\n"
                 "  Username: Administrator\n"
                 "  Password: Teddysun.com\n\n"
-                "Gunakan /status untuk cek apakah VPS sudah online."
+                "Gunakan /status untuk cek apakah VPS sudah online.\n"
+                "Gunakan /start untuk reinstall lagi."
             )
         else:
             await query.edit_message_text(
@@ -329,7 +389,8 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "Login setelah selesai:\n"
                 f"  SSH: ssh root@{data['vps_ip']}\n"
                 "  Password: password123\n\n"
-                "Gunakan /status untuk cek apakah VPS sudah online."
+                "Gunakan /status untuk cek apakah VPS sudah online.\n"
+                "Gunakan /start untuk reinstall lagi."
             )
     else:
         await query.edit_message_text(
@@ -443,29 +504,29 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(
         "Reinstall OS Bot - by xyzval\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Cara pakai:\n"
+        "1. Kirim /start\n"
+        "2. Kirim detail VPS: ip password\n"
+        "3. Pilih OS\n"
+        "4. Selesai!\n\n"
+        "Format detail VPS:\n"
+        "  ip password\n"
+        "  ip port password\n"
+        "  ip port username password\n\n"
+        "Contoh:\n"
+        "  103.1.2.3 MyPass123\n"
+        "  103.1.2.3 22 root MyPass123\n\n"
         "Perintah:\n"
-        "  /start  - Mulai reinstall OS\n"
-        "  /status - Cek status VPS (online/offline)\n"
-        "  /cancel - Batalkan proses\n"
-        "  /help   - Tampilkan bantuan\n\n"
-        "Windows yang tersedia:\n"
-        "  - Windows 10\n"
-        "  - Windows 11\n"
-        "  - Windows Server 2012 R2\n"
-        "  - Windows Server 2016\n"
-        "  - Windows Server 2019\n"
-        "  - Windows Server 2022\n\n"
-        "Linux yang tersedia:\n"
-        "  - Debian 11, 12\n"
-        "  - Ubuntu 20.04, 22.04, 24.04\n"
-        "  - CentOS 9 Stream\n"
-        "  - AlmaLinux 9\n"
-        "  - RockyLinux 9\n"
-        "  - Fedora 43\n"
-        "  - Alpine 3.22\n\n"
-        "Login setelah install:\n"
-        "  Windows: Administrator / Teddysun.com (RDP port 3389)\n"
-        "  Linux: root / password123 (SSH port 22)"
+        "  /start  - Mulai reinstall\n"
+        "  /status - Cek VPS online/offline\n"
+        "  /cancel - Batalkan\n"
+        "  /help   - Bantuan\n\n"
+        "OS tersedia:\n"
+        "  Windows: 10, 11, Server 2012-2022\n"
+        "  Linux: Debian, Ubuntu, CentOS, dll\n\n"
+        "Login default:\n"
+        "  Windows: Administrator / Teddysun.com\n"
+        "  Linux: root / password123"
     )
 
 
@@ -482,10 +543,7 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            VPS_IP: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vps_ip)],
-            VPS_PORT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vps_port)],
-            VPS_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vps_user)],
-            VPS_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vps_pass)],
+            VPS_DETAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vps_detail)],
             SELECT_OS: [CallbackQueryHandler(select_os, pattern="^os_"),
                         CallbackQueryHandler(select_os_category, pattern="^(cat_|back_)")],
             SELECT_LANG: [CallbackQueryHandler(select_lang, pattern="^lang_")],
