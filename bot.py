@@ -385,15 +385,18 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
                 "wget --no-check-certificate -qO /tmp/InstallNET.sh "
                 "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' && "
                 f"chmod a+x /tmp/InstallNET.sh && "
-                f"bash /tmp/InstallNET.sh {data['os_cmd']} -lang \"{data['lang']}\""
+                f"echo 'y' | bash /tmp/InstallNET.sh {data['os_cmd']} -lang \"{data['lang']}\" -firmware"
             )
         else:
             cmd = (
                 "wget --no-check-certificate -qO /tmp/InstallNET.sh "
                 "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' && "
                 f"chmod a+x /tmp/InstallNET.sh && "
-                f"bash /tmp/InstallNET.sh {data['os_cmd']} -pwd 'password123'"
+                f"echo 'y' | bash /tmp/InstallNET.sh {data['os_cmd']} -pwd 'password123' -firmware"
             )
+
+        # Wrap in nohup so it keeps running after SSH disconnects
+        full_cmd = f"nohup bash -c \"{cmd}\" > /tmp/reinstall.log 2>&1 &"
 
         # Connect via SSH
         ssh = paramiko.SSHClient()
@@ -408,13 +411,11 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
             look_for_keys=False,
         )
 
-        # Execute command (non-blocking, because VPS will reboot)
-        transport = ssh.get_transport()
-        channel = transport.open_session()
-        channel.exec_command(cmd)
+        # Execute command
+        stdin, stdout, stderr = ssh.exec_command(full_cmd)
 
-        # Wait a bit to make sure command started
-        await asyncio.sleep(5)
+        # Wait for command to start
+        await asyncio.sleep(10)
 
         ssh.close()
         return True
