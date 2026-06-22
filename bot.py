@@ -415,27 +415,27 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
             ssh.close()
             return False
 
-        # Step 2: Run the install command in background
+        # Step 2: Run the install command directly (script will reboot VPS)
         logger.info(f"Running install: {install_cmd}")
-        channel = ssh.get_transport().open_session()
-        channel.exec_command(f"bash {install_cmd} < /dev/null > /tmp/reinstall.log 2>&1")
+        stdin, stdout, stderr = ssh.exec_command(
+            f"bash {install_cmd} < /dev/null 2>&1 | tee /tmp/reinstall.log &"
+        )
 
-        # Wait a bit to let the script start
-        await asyncio.sleep(10)
+        # Wait for script to start and begin processing
+        await asyncio.sleep(15)
 
-        # Step 3: Verify script is running
-        stdin2, stdout2, stderr2 = ssh.exec_command("ps aux | grep InstallNET | grep -v grep | head -3")
-        await asyncio.sleep(2)
-        ps_output = stdout2.read().decode('utf-8', errors='ignore').strip()
-        logger.info(f"Process check: {ps_output}")
+        # Step 3: Check log to see if script started
+        stdin3, stdout3, stderr3 = ssh.exec_command("cat /tmp/reinstall.log 2>/dev/null | tail -5; echo '---'; ps aux | grep -E 'InstallNET|wget|grub' | grep -v grep")
+        await asyncio.sleep(3)
+        check_output = stdout3.read().decode('utf-8', errors='ignore').strip()
+        logger.info(f"Check output: {check_output}")
 
-        ssh.close()
+        try:
+            ssh.close()
+        except Exception:
+            pass
 
-        if ps_output:
-            return True
-        else:
-            # Script might have already triggered reboot
-            return True
+        return True
 
     except paramiko.AuthenticationException:
         context.user_data["error_msg"] = "Username atau password salah"
