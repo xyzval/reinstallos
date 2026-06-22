@@ -52,14 +52,10 @@ WINDOWS_OPTIONS = {
 LINUX_OPTIONS = {
     "debian12": {"name": "Debian 12", "cmd": '-debian 12'},
     "debian11": {"name": "Debian 11", "cmd": '-debian 11'},
-    "ubuntu2404": {"name": "Ubuntu 24.04", "cmd": '-ubuntu 24.04'},
     "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": '-ubuntu 22.04'},
     "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": '-ubuntu 20.04'},
     "centos9": {"name": "CentOS 9 Stream", "cmd": '-centos 9'},
     "alma9": {"name": "AlmaLinux 9", "cmd": '-almalinux 9'},
-    "rocky9": {"name": "RockyLinux 9", "cmd": '-rockylinux 9'},
-    "fedora43": {"name": "Fedora 43", "cmd": '-fedora 43'},
-    "alpine": {"name": "Alpine 3.22", "cmd": '-alpinelinux 3.22'},
 }
 
 LANG_OPTIONS = {
