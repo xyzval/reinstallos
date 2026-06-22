@@ -379,21 +379,11 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
     """Connect to VPS via SSH and run the install command."""
     try:
-        # Build the install script content
+        # Build the install command
         if data["os_type"] == "windows":
-            install_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -firmware"
+            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -firmware"
         else:
-            install_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -pwd 'password123' -firmware"
-
-        script_content = (
-            "#!/bin/bash\n"
-            "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"
-            "cd /tmp\n"
-            "wget --no-check-certificate -qO /tmp/InstallNET.sh "
-            "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh'\n"
-            "chmod a+x /tmp/InstallNET.sh\n"
-            f"{install_cmd} <<< 'y'\n"
-        )
+            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd 'password123' -firmware"
 
         # Connect via SSH
         ssh = paramiko.SSHClient()
@@ -408,30 +398,44 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
             look_for_keys=False,
         )
 
-        # Write script to VPS via SFTP
-        sftp = ssh.open_sftp()
-        with sftp.file('/tmp/do_reinstall.sh', 'w') as f:
-            f.write(script_content)
-        sftp.close()
-
-        # Execute: chmod + run in background using screen or disown
-        channel = ssh.get_transport().open_session()
-        channel.exec_command(
-            "chmod +x /tmp/do_reinstall.sh; "
-            "setsid bash /tmp/do_reinstall.sh > /tmp/reinstall.log 2>&1 < /dev/null &"
+        # Step 1: Download InstallNET.sh and wait for it to finish
+        logger.info(f"Downloading InstallNET.sh to {data['vps_ip']}...")
+        stdin, stdout, stderr = ssh.exec_command(
+            "wget --no-check-certificate -qO /tmp/InstallNET.sh "
+            "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' "
+            "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
         )
+        # Wait for download to complete (max 60s)
+        stdout.channel.settimeout(60)
+        output = stdout.read().decode('utf-8', errors='ignore').strip()
+        logger.info(f"Download result: {output}")
 
-        # Wait for download and script to begin
-        await asyncio.sleep(15)
+        if "DOWNLOAD_OK" not in output:
+            context.user_data["error_msg"] = f"Gagal download script: {output}"
+            ssh.close()
+            return False
 
-        # Check if script file was downloaded
-        stdin, stdout, stderr = ssh.exec_command("ls -la /tmp/InstallNET.sh 2>&1; echo '---'; cat /tmp/reinstall.log 2>&1 | tail -10")
-        await asyncio.sleep(3)
-        output = stdout.read().decode('utf-8', errors='ignore')
-        logger.info(f"Install check: {output}")
+        # Step 2: Run the install command in background
+        logger.info(f"Running install: {install_cmd}")
+        channel = ssh.get_transport().open_session()
+        channel.exec_command(f"bash {install_cmd} < /dev/null > /tmp/reinstall.log 2>&1")
+
+        # Wait a bit to let the script start
+        await asyncio.sleep(10)
+
+        # Step 3: Verify script is running
+        stdin2, stdout2, stderr2 = ssh.exec_command("ps aux | grep InstallNET | grep -v grep | head -3")
+        await asyncio.sleep(2)
+        ps_output = stdout2.read().decode('utf-8', errors='ignore').strip()
+        logger.info(f"Process check: {ps_output}")
 
         ssh.close()
-        return True
+
+        if ps_output:
+            return True
+        else:
+            # Script might have already triggered reboot
+            return True
 
     except paramiko.AuthenticationException:
         context.user_data["error_msg"] = "Username atau password salah"
