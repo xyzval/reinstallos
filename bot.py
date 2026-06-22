@@ -413,13 +413,20 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
             f.write(script_content)
         sftp.close()
 
-        # Execute script in background with nohup
-        ssh.exec_command("chmod +x /tmp/do_reinstall.sh")
-        await asyncio.sleep(1)
-        ssh.exec_command("nohup bash /tmp/do_reinstall.sh > /tmp/reinstall.log 2>&1 &")
+        # Execute all in one command to avoid timing issues
+        stdin, stdout, stderr = ssh.exec_command(
+            "chmod +x /tmp/do_reinstall.sh && "
+            "nohup bash /tmp/do_reinstall.sh > /tmp/reinstall.log 2>&1 & "
+            "sleep 3 && cat /tmp/reinstall.log | tail -5"
+        )
 
-        # Wait for script to start running
-        await asyncio.sleep(10)
+        # Wait and get output to verify it started
+        await asyncio.sleep(15)
+        output = stdout.read().decode('utf-8', errors='ignore')
+        error = stderr.read().decode('utf-8', errors='ignore')
+        logger.info(f"Install output: {output}")
+        if error:
+            logger.info(f"Install stderr: {error}")
 
         ssh.close()
         return True
