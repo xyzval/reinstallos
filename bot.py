@@ -156,17 +156,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(
         "Reinstall OS Bot - by xyzval\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Kirim detail VPS dalam 1 pesan:\n\n"
-        "Format:\n"
-        "  ip password\n"
-        "  ip port password\n"
-        "  ip port username password\n\n"
-        "Contoh:\n"
-        "  103.1.2.3 MyPassword123\n"
-        "  103.1.2.3 22 MyPassword123\n"
-        "  103.1.2.3 22 root MyPassword123\n"
-        "  103.1.2.3:2222 root MyPassword123\n\n"
-        "Default: port=22, username=root"
+        "Kirim detail VPS kamu dengan format:\n\n"
+        "`ip password`\n"
+        "`ip port password`\n"
+        "`ip port username password`\n\n"
+        "Contoh kirim seperti ini:\n\n"
+        "`103.1.2.3 MyPassword123`\n\n"
+        "atau\n\n"
+        "`103.1.2.3 22 root MyPassword123`\n\n"
+        "Tinggal copy, ganti dengan detail VPS kamu, lalu kirim.",
+        parse_mode="Markdown",
     )
     return VPS_DETAIL
 
