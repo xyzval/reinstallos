@@ -379,24 +379,20 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
     """Connect to VPS via SSH and run the install command."""
     try:
-        # Build the install command
+        # Build the install script
         if data["os_type"] == "windows":
-            cmd = (
-                "wget --no-check-certificate -qO /tmp/InstallNET.sh "
-                "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' && "
-                f"chmod a+x /tmp/InstallNET.sh && "
-                f"echo 'y' | bash /tmp/InstallNET.sh {data['os_cmd']} -lang \"{data['lang']}\" -firmware"
-            )
+            install_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -firmware"
         else:
-            cmd = (
-                "wget --no-check-certificate -qO /tmp/InstallNET.sh "
-                "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' && "
-                f"chmod a+x /tmp/InstallNET.sh && "
-                f"echo 'y' | bash /tmp/InstallNET.sh {data['os_cmd']} -pwd 'password123' -firmware"
-            )
+            install_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -pwd 'password123' -firmware"
 
-        # Wrap in nohup so it keeps running after SSH disconnects
-        full_cmd = f"nohup bash -c \"{cmd}\" > /tmp/reinstall.log 2>&1 &"
+        # Create a script file on VPS, then execute it
+        script_content = (
+            "#!/bin/bash\n"
+            "wget --no-check-certificate -qO /tmp/InstallNET.sh "
+            "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh'\n"
+            "chmod a+x /tmp/InstallNET.sh\n"
+            f"yes | {install_cmd}\n"
+        )
 
         # Connect via SSH
         ssh = paramiko.SSHClient()
@@ -411,10 +407,18 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
             look_for_keys=False,
         )
 
-        # Execute command
-        stdin, stdout, stderr = ssh.exec_command(full_cmd)
+        # Write script to VPS
+        sftp = ssh.open_sftp()
+        with sftp.file('/tmp/do_reinstall.sh', 'w') as f:
+            f.write(script_content)
+        sftp.close()
 
-        # Wait for command to start
+        # Execute script in background with nohup
+        ssh.exec_command("chmod +x /tmp/do_reinstall.sh")
+        await asyncio.sleep(1)
+        ssh.exec_command("nohup bash /tmp/do_reinstall.sh > /tmp/reinstall.log 2>&1 &")
+
+        # Wait for script to start running
         await asyncio.sleep(10)
 
         ssh.close()
