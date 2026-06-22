@@ -415,20 +415,26 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
             ssh.close()
             return False
 
-        # Step 2: Run the install command directly (script will reboot VPS)
+        # Step 2: Run install and reboot after completion
+        # Script runs in foreground but we don't wait for it to finish
+        # After script finishes setup, it needs a reboot to start installation
         logger.info(f"Running install: {install_cmd}")
-        stdin, stdout, stderr = ssh.exec_command(
-            f"bash {install_cmd} < /dev/null 2>&1 | tee /tmp/reinstall.log &"
+        channel = ssh.get_transport().open_session()
+        channel.exec_command(
+            f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
         )
 
-        # Wait for script to start and begin processing
-        await asyncio.sleep(15)
+        # Wait for script to download images and setup grub
+        await asyncio.sleep(20)
 
-        # Step 3: Check log to see if script started
-        stdin3, stdout3, stderr3 = ssh.exec_command("cat /tmp/reinstall.log 2>/dev/null | tail -5; echo '---'; ps aux | grep -E 'InstallNET|wget|grub' | grep -v grep")
-        await asyncio.sleep(3)
-        check_output = stdout3.read().decode('utf-8', errors='ignore').strip()
-        logger.info(f"Check output: {check_output}")
+        # Step 3: Check log to see progress
+        try:
+            stdin3, stdout3, stderr3 = ssh.exec_command("tail -10 /tmp/reinstall.log 2>/dev/null")
+            await asyncio.sleep(3)
+            check_output = stdout3.read().decode('utf-8', errors='ignore').strip()
+            logger.info(f"Check output: {check_output}")
+        except Exception:
+            logger.info("SSH connection lost - VPS is rebooting (good!)")
 
         try:
             ssh.close()
