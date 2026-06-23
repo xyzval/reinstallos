@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
 """
-Telegram Bot - Reinstall OS
+Telegram Bot - Reinstall OS v2.0
 by xyzval
 
-Bot Telegram untuk reinstall VPS ke Windows/Linux secara otomatis.
-Kirim detail VPS dalam 1 pesan, pilih OS, bot akan menginstall otomatis.
+Features:
+- Multi-VPS management (save multiple VPS)
+- Inline button menu (reinstall, info, reboot, shutdown, ssh)
+- Professional loading UI
+- Auto-fix Linux password after install
 """
 
 import os
+import json
 import logging
 import asyncio
+import socket
+import time as _time
 import paramiko
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -25,19 +31,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-# Bot Token
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "").split(",")
+VPS_FILE = "/opt/reinstallos/vps_data.json"
 
 # Conversation states
-VPS_DETAIL, SELECT_OS, SELECT_LANG, CONFIRM = range(4)
+ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD = range(6)
+
 
 # OS Options
 WINDOWS_OPTIONS = {
@@ -60,163 +66,412 @@ LINUX_OPTIONS = {
     "alma9": {"name": "AlmaLinux 9", "cmd": '-almalinux 9', "engine": "leitbogioro"},
 }
 
-LANG_OPTIONS = {
-    "en": "English",
-    "cn": "Chinese",
-    "jp": "Japanese",
-}
+LANG_OPTIONS = {"en": "English", "cn": "Chinese", "jp": "Japanese"}
+
+
+
+# ============ VPS Storage ============
+
+def load_vps_list(user_id: int) -> list:
+    """Load VPS list from JSON file."""
+    try:
+        if os.path.exists(VPS_FILE):
+            with open(VPS_FILE, 'r') as f:
+                data = json.load(f)
+            return data.get(str(user_id), [])
+    except Exception:
+        pass
+    return []
+
+
+def save_vps_list(user_id: int, vps_list: list):
+    """Save VPS list to JSON file."""
+    try:
+        data = {}
+        if os.path.exists(VPS_FILE):
+            with open(VPS_FILE, 'r') as f:
+                data = json.load(f)
+        data[str(user_id)] = vps_list
+        with open(VPS_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Save VPS error: {e}")
 
 
 def is_authorized(user_id: int) -> bool:
-    """Check if user is authorized to use the bot."""
     if not ALLOWED_USERS or ALLOWED_USERS == [""]:
         return True
     return str(user_id) in ALLOWED_USERS
 
 
 def parse_vps_detail(text: str) -> dict:
-    """
-    Parse VPS detail dari 1 pesan.
-    Format: ip:port@user:password
-    Contoh: 209.74.81.155:22@root:password123
-    """
+    """Parse ip:port@user:password"""
     text = text.strip()
-
-    result = {
-        "vps_ip": "",
-        "vps_port": 22,
-        "vps_user": "root",
-        "vps_pass": "",
-    }
-
+    result = {"vps_ip": "", "vps_port": 22, "vps_user": "root", "vps_pass": ""}
     try:
-        # Split by @ -> [ip:port, user:password]
         if "@" not in text:
             return None
-
         connection, login = text.split("@", 1)
-
-        # Parse ip:port
         if ":" in connection:
             ip, port = connection.rsplit(":", 1)
             result["vps_ip"] = ip
             result["vps_port"] = int(port)
         else:
             result["vps_ip"] = connection
-            result["vps_port"] = 22
-
-        # Parse user:password
         if ":" in login:
             user, password = login.split(":", 1)
             result["vps_user"] = user
             result["vps_pass"] = password
         else:
             return None
-
         if not result["vps_ip"] or not result["vps_pass"]:
             return None
-
         return result
-
     except (ValueError, IndexError):
         return None
 
 
+
+# ============ Menu Helpers ============
+
+def get_vps_list_keyboard(user_id: int):
+    """Build VPS list keyboard."""
+    vps_list = load_vps_list(user_id)
+    keyboard = []
+    for i, vps in enumerate(vps_list):
+        label = f"🖥 {vps['vps_ip']}:{vps['vps_port']}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"selvps_{i}")])
+    keyboard.append([InlineKeyboardButton("➕ Tambah VPS Baru", callback_data="addvps")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_action_keyboard():
+    """Build action menu keyboard."""
+    keyboard = [
+        [InlineKeyboardButton("🔄 REINSTALL OS", callback_data="act_reinstall")],
+        [
+            InlineKeyboardButton("📊 Info", callback_data="act_info"),
+            InlineKeyboardButton("🔄 Reboot", callback_data="act_reboot"),
+            InlineKeyboardButton("⏹ Shutdown", callback_data="act_shutdown"),
+        ],
+        [InlineKeyboardButton("💻 SSH Command", callback_data="act_ssh")],
+        [
+            InlineKeyboardButton("🗑 Hapus VPS", callback_data="act_delete"),
+            InlineKeyboardButton("◀️ Kembali", callback_data="act_back"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_vps_info_text(data: dict) -> str:
+    """Build VPS info header."""
+    return (
+        "─────────────────────────────\n"
+        f"  🖥️  VPS: {data['vps_ip']}:{data['vps_port']}\n"
+        f"  👤  User: {data['vps_user']}\n"
+        "─────────────────────────────"
+    )
+
+
+
+# ============ Handlers ============
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start command - begin the conversation."""
+    """Show VPS list or add new."""
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text("Kamu tidak memiliki akses ke bot ini.")
+        await update.message.reply_text("Tidak ada akses.")
         return ConversationHandler.END
 
-    await update.message.reply_text(
-        "Reinstall OS Bot - by xyzval\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Kirim detail VPS dengan format:\n\n"
-        "`ip:port@user:password`\n\n"
-        "Contoh:\n"
-        "`209.74.81.155:22@root:password123`",
-        parse_mode="Markdown",
-    )
-    return VPS_DETAIL
+    vps_list = load_vps_list(user_id)
+    if vps_list:
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  🖥️  Reinstall OS Bot\n"
+            "─────────────────────────────\n\n"
+            "  Pilih VPS atau tambah baru:\n",
+            reply_markup=get_vps_list_keyboard(user_id),
+        )
+        return SELECT_VPS_ACTION
+    else:
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  🖥️  Reinstall OS Bot\n"
+            "─────────────────────────────\n\n"
+            "  Belum ada VPS tersimpan.\n"
+            "  Kirim detail VPS dengan format:\n\n"
+            "  `ip:port@user:password`\n\n"
+            "  Contoh:\n"
+            "  `104.207.77.243:22@root:Bolehtuh1`",
+            parse_mode="Markdown",
+        )
+        return ADD_VPS
 
 
-async def get_vps_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Parse VPS detail from single message."""
+async def add_vps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Parse and save new VPS."""
     text = update.message.text.strip()
-
-    # Parse the detail
     data = parse_vps_detail(text)
 
     if data is None:
         await update.message.reply_text(
-            "Format salah! Kirim ulang dengan format:\n\n"
+            "Format salah! Kirim ulang:\n\n"
             "`ip:port@user:password`\n\n"
-            "Contoh:\n"
-            "`209.74.81.155:22@root:password123`",
+            "Contoh: `104.207.77.243:22@root:Bolehtuh1`",
             parse_mode="Markdown",
         )
-        return VPS_DETAIL
+        return ADD_VPS
 
-    # Store data
-    context.user_data.update(data)
-
-    # Delete message for security (contains password)
+    # Delete message (contains password)
     try:
         await update.message.delete()
     except Exception:
         pass
 
-    # Show OS selection menu
-    keyboard = [
-        [InlineKeyboardButton("WINDOWS", callback_data="cat_windows")],
-        [InlineKeyboardButton("LINUX", callback_data="cat_linux")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Save to VPS list
+    user_id = update.effective_user.id
+    vps_list = load_vps_list(user_id)
+    # Check if already exists
+    exists = any(v['vps_ip'] == data['vps_ip'] and v['vps_port'] == data['vps_port'] for v in vps_list)
+    if not exists:
+        vps_list.append(data)
+        save_vps_list(user_id, vps_list)
 
+    # Set as active VPS
+    context.user_data.update(data)
+
+    # Show action menu
     await update.message.reply_text(
-        "VPS tersimpan!\n\n"
-        f"  IP   : {data['vps_ip']}\n"
-        f"  Port : {data['vps_port']}\n"
-        f"  User : {data['vps_user']}\n"
-        f"  Pass : {'*' * len(data['vps_pass'])}\n\n"
-        "Pilih kategori OS:",
-        reply_markup=reply_markup,
+        get_vps_info_text(data) + "\n\n  ✅ VPS tersimpan!\n\n  Pilih aksi:",
+        reply_markup=get_action_keyboard(),
     )
-    return SELECT_OS
+    return SELECT_VPS_ACTION
 
 
-async def select_os_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show OS options based on category."""
+
+async def select_vps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle VPS selection or add new."""
     query = update.callback_query
     await query.answer()
 
-    category = query.data
+    user_id = update.effective_user.id
 
-    if category == "cat_windows":
-        keyboard = []
-        for key, val in WINDOWS_OPTIONS.items():
-            keyboard.append([InlineKeyboardButton(val["name"], callback_data=f"os_{key}")])
-        keyboard.append([InlineKeyboardButton("Kembali", callback_data="back_main")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Pilih Windows:", reply_markup=reply_markup)
+    if query.data == "addvps":
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ➕  Tambah VPS Baru\n"
+            "─────────────────────────────\n\n"
+            "  Kirim detail VPS:\n\n"
+            "  `ip:port@user:password`\n\n"
+            "  Contoh:\n"
+            "  `104.207.77.243:22@root:Bolehtuh1`",
+            parse_mode="Markdown",
+        )
+        return ADD_VPS
 
-    elif category == "cat_linux":
-        keyboard = []
-        for key, val in LINUX_OPTIONS.items():
-            keyboard.append([InlineKeyboardButton(val["name"], callback_data=f"os_{key}")])
-        keyboard.append([InlineKeyboardButton("Kembali", callback_data="back_main")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Pilih Linux:", reply_markup=reply_markup)
+    if query.data.startswith("selvps_"):
+        idx = int(query.data.replace("selvps_", ""))
+        vps_list = load_vps_list(user_id)
+        if idx < len(vps_list):
+            data = vps_list[idx]
+            context.user_data.update(data)
+            await query.edit_message_text(
+                get_vps_info_text(data) + "\n\n  Pilih aksi:",
+                reply_markup=get_action_keyboard(),
+            )
+            return SELECT_VPS_ACTION
 
-    elif category == "back_main":
+    return SELECT_VPS_ACTION
+
+
+async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle action buttons."""
+    query = update.callback_query
+    await query.answer()
+    data = context.user_data
+    user_id = update.effective_user.id
+    action = query.data
+
+    if action == "act_back":
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  🖥️  Reinstall OS Bot\n"
+            "─────────────────────────────\n\n"
+            "  Pilih VPS atau tambah baru:\n",
+            reply_markup=get_vps_list_keyboard(user_id),
+        )
+        return SELECT_VPS_ACTION
+
+    if action == "act_delete":
+        vps_list = load_vps_list(user_id)
+        vps_list = [v for v in vps_list if not (v['vps_ip'] == data.get('vps_ip') and v['vps_port'] == data.get('vps_port'))]
+        save_vps_list(user_id, vps_list)
+        await query.edit_message_text(
+            f"  🗑 VPS {data.get('vps_ip')} dihapus!\n\n",
+            reply_markup=get_vps_list_keyboard(user_id),
+        )
+        return SELECT_VPS_ACTION
+
+    if action == "act_reinstall":
         keyboard = [
             [InlineKeyboardButton("WINDOWS", callback_data="cat_windows")],
             [InlineKeyboardButton("LINUX", callback_data="cat_linux")],
+            [InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")],
         ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text("Pilih kategori OS:", reply_markup=reply_markup)
+        await query.edit_message_text(
+            get_vps_info_text(data) + "\n\n  Pilih kategori OS:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return SELECT_OS
 
+    if action == "act_ssh":
+        await query.edit_message_text(
+            get_vps_info_text(data) + "\n\n"
+            "  💻 Kirim command SSH:\n\n"
+            "  Contoh: `uptime` atau `df -h`",
+            parse_mode="Markdown",
+        )
+        return SSH_CMD
+
+    if action == "act_info":
+        await query.edit_message_text(f"  ⏳ Mengambil info {data['vps_ip']}...")
+        info_text = await get_vps_system_info(data)
+        keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
+        await query.edit_message_text(info_text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return SELECT_VPS_ACTION
+
+    if action == "act_reboot":
+        result = await ssh_exec(data, "reboot")
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  🔄  VPS Rebooting\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n"
+            "  Status: Reboot sent!\n"
+            "  Online dalam 1-3 menit.\n\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]),
+        )
+        return SELECT_VPS_ACTION
+
+    if action == "act_shutdown":
+        result = await ssh_exec(data, "shutdown -h now")
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ⏹️  VPS Shutting Down\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n"
+            "  Status: Shutdown sent!\n\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]),
+        )
+        return SELECT_VPS_ACTION
+
+    if action == "act_back_menu":
+        await query.edit_message_text(
+            get_vps_info_text(data) + "\n\n  Pilih aksi:",
+            reply_markup=get_action_keyboard(),
+        )
+        return SELECT_VPS_ACTION
+
+    return SELECT_VPS_ACTION
+
+
+
+async def ssh_cmd_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Execute SSH command from chat."""
+    data = context.user_data
+    cmd_text = update.message.text.strip()
+
+    await update.message.reply_text(f"⏳ `{cmd_text}`...", parse_mode="Markdown")
+
+    result = await ssh_exec(data, cmd_text)
+    if len(result) > 3000:
+        result = result[:3000] + "\n... (truncated)"
+
+    keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
+    await update.message.reply_text(
+        "─────────────────────────────\n"
+        "  💻  SSH Result\n"
+        "─────────────────────────────\n\n"
+        f"  ⌨️  {cmd_text}\n\n"
+        f"{result}\n\n"
+        "─────────────────────────────\n\n"
+        "Kirim command lain atau klik Menu.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return SSH_CMD
+
+
+# ============ SSH Helpers ============
+
+async def ssh_exec(data: dict, cmd: str) -> str:
+    """Execute SSH command and return output."""
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=data["vps_ip"], port=data["vps_port"],
+            username=data["vps_user"], password=data["vps_pass"],
+            timeout=15, allow_agent=False, look_for_keys=False,
+        )
+        stdin, stdout, stderr = ssh.exec_command(cmd)
+        stdout.channel.settimeout(30)
+        output = stdout.read().decode('utf-8', errors='ignore').strip()
+        error = stderr.read().decode('utf-8', errors='ignore').strip()
+        ssh.close()
+        return output if output else error if error else "(no output)"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+async def get_vps_system_info(data: dict) -> str:
+    """Get VPS system info via SSH."""
+    info_cmd = (
+        "echo \"OS: $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'\"' -f2)\";"
+        "echo \"Kernel: $(uname -r)\";"
+        "echo \"Uptime: $(uptime -p 2>/dev/null || uptime)\";"
+        "echo \"CPU: $(nproc) cores\";"
+        "echo \"RAM: $(free -m | awk '/Mem:/ {printf \"%dMB / %dMB (%.0f%%)\", $3, $2, $3/$2*100}')\";"
+        "echo \"Disk: $(df -h / | awk 'NR==2 {printf \"%s / %s (%s)\", $3, $2, $5}')\";"
+        "echo \"Load: $(cat /proc/loadavg | awk '{print $1, $2, $3}')\""
+    )
+    result = await ssh_exec(data, info_cmd)
+    return (
+        "─────────────────────────────\n"
+        "  📊  VPS System Info\n"
+        "─────────────────────────────\n\n"
+        f"  🎯 {data['vps_ip']}:{data['vps_port']}\n\n"
+        "─────────────────────────────\n\n"
+        f"{result}\n\n"
+        "─────────────────────────────"
+    )
+
+
+
+# ============ OS Install Flow ============
+
+async def select_os_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Show OS options."""
+    query = update.callback_query
+    await query.answer()
+    data = context.user_data
+    category = query.data
+
+    if category == "cat_windows":
+        keyboard = [[InlineKeyboardButton(v["name"], callback_data=f"os_{k}")] for k, v in WINDOWS_OPTIONS.items()]
+        keyboard.append([InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")])
+        await query.edit_message_text("Pilih Windows:", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif category == "cat_linux":
+        keyboard = [[InlineKeyboardButton(v["name"], callback_data=f"os_{k}")] for k, v in LINUX_OPTIONS.items()]
+        keyboard.append([InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")])
+        await query.edit_message_text("Pilih Linux:", reply_markup=InlineKeyboardMarkup(keyboard))
+    elif category == "act_back_menu":
+        await query.edit_message_text(
+            get_vps_info_text(data) + "\n\n  Pilih aksi:",
+            reply_markup=get_action_keyboard(),
+        )
+        return SELECT_VPS_ACTION
     return SELECT_OS
 
 
@@ -224,40 +479,22 @@ async def select_os(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle OS selection."""
     query = update.callback_query
     await query.answer()
-
     os_key = query.data.replace("os_", "")
-    context.user_data["os_key"] = os_key
 
-    # Determine if Windows or Linux
     if os_key in WINDOWS_OPTIONS:
         context.user_data["os_name"] = WINDOWS_OPTIONS[os_key]["name"]
         context.user_data["os_cmd"] = WINDOWS_OPTIONS[os_key]["cmd"]
         context.user_data["os_type"] = "windows"
-
-        # Ask for language
-        keyboard = [
-            [InlineKeyboardButton("English", callback_data="lang_en")],
-            [InlineKeyboardButton("Chinese", callback_data="lang_cn")],
-            [InlineKeyboardButton("Japanese", callback_data="lang_jp")],
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            f"OS: {context.user_data['os_name']}\n\n"
-            "Pilih bahasa:",
-            reply_markup=reply_markup,
-        )
+        keyboard = [[InlineKeyboardButton(v, callback_data=f"lang_{k}")] for k, v in LANG_OPTIONS.items()]
+        await query.edit_message_text(f"OS: {context.user_data['os_name']}\n\nPilih bahasa:", reply_markup=InlineKeyboardMarkup(keyboard))
         return SELECT_LANG
-
     elif os_key in LINUX_OPTIONS:
         context.user_data["os_name"] = LINUX_OPTIONS[os_key]["name"]
         context.user_data["os_cmd"] = LINUX_OPTIONS[os_key]["cmd"]
         context.user_data["os_type"] = "linux"
         context.user_data["os_engine"] = LINUX_OPTIONS[os_key]["engine"]
         context.user_data["lang"] = ""
-
-        # Skip language, go to confirm
         return await show_confirm(query, context)
-
     return SELECT_OS
 
 
@@ -265,69 +502,52 @@ async def select_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     """Handle language selection."""
     query = update.callback_query
     await query.answer()
-
-    lang = query.data.replace("lang_", "")
-    context.user_data["lang"] = lang
-
+    context.user_data["lang"] = query.data.replace("lang_", "")
     return await show_confirm(query, context)
 
 
 async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Show confirmation before install."""
+    """Show confirmation."""
     data = context.user_data
-
-    # Build summary
+    os_type = data["os_type"]
     summary = (
-        "KONFIRMASI INSTALASI\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"VPS: {data['vps_ip']}:{data['vps_port']}\n"
-        f"User: {data['vps_user']}\n"
-        f"OS: {data['os_name']}\n"
+        "─────────────────────────────\n"
+        "  ⚠️  KONFIRMASI REINSTALL\n"
+        "─────────────────────────────\n\n"
+        f"  🎯 {data['vps_ip']}:{data['vps_port']}\n"
+        f"  📦 {data['os_name']}\n"
     )
     if data.get("lang"):
-        summary += f"Bahasa: {LANG_OPTIONS.get(data['lang'], data['lang'])}\n"
-
-    if data["os_type"] == "windows":
-        summary += (
-            "\nLogin setelah selesai:\n"
-            f"  RDP Host: {data['vps_ip']}:3389\n"
-            "  Username: Administrator\n"
-            "  Password: Teddysun.com\n"
-        )
+        summary += f"  🌐 {LANG_OPTIONS.get(data['lang'], '')}\n"
+    if os_type == "windows":
+        summary += "\n  🔑 Login: Administrator / Teddysun.com\n"
     else:
-        summary += (
-            "\nLogin setelah selesai:\n"
-            f"  SSH: root@{data['vps_ip']}\n"
-            "  Password: Bolehtuh1\n"
-        )
-
-    summary += (
-        "\nPERINGATAN: SEMUA DATA AKAN DIHAPUS!\n"
-        "\nLanjutkan instalasi?"
-    )
+        summary += "\n  🔑 Login: root / Bolehtuh1\n"
+    summary += "\n  ⚠️ SEMUA DATA AKAN DIHAPUS!\n"
 
     keyboard = [
-        [
-            InlineKeyboardButton("YA, INSTALL!", callback_data="confirm_yes"),
-            InlineKeyboardButton("BATAL", callback_data="confirm_no"),
-        ]
+        [InlineKeyboardButton("✅ YA, INSTALL!", callback_data="confirm_yes"),
+         InlineKeyboardButton("❌ BATAL", callback_data="confirm_no")]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(summary, reply_markup=reply_markup)
+    await query.edit_message_text(summary, reply_markup=InlineKeyboardMarkup(keyboard))
     return CONFIRM
 
 
+
 async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle confirmation."""
+    """Handle install confirmation."""
     query = update.callback_query
     await query.answer()
 
     if query.data == "confirm_no":
-        await query.edit_message_text("Instalasi dibatalkan.\n\nGunakan /start untuk mulai lagi.")
-        return ConversationHandler.END
+        data = context.user_data
+        await query.edit_message_text(
+            "  ❌ Dibatalkan.\n",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]),
+        )
+        return SELECT_VPS_ACTION
 
     data = context.user_data
-    import time as _time
     start_time = _time.time()
 
     success = await run_install(query, context, data)
@@ -336,58 +556,28 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         error_msg = data.get("error_msg", "Unknown error")
         await query.edit_message_text(
             "─────────────────────────────\n"
-            "  ❌  OS Installation Failed\n"
+            "  ❌  Installation Failed\n"
             "─────────────────────────────\n\n"
-            f"  🎯 {data['vps_ip']}\n"
-            f"  📦 {data['os_name']}\n\n"
-            "─────────────────────────────\n\n"
-            f"  ● SSH Connection      FAILED\n\n"
-            f"  Error: {error_msg}\n\n"
-            "─────────────────────────────\n\n"
-            "/start untuk coba lagi"
+            f"  Error: {error_msg}\n",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]),
         )
-        return ConversationHandler.END
+        return SELECT_VPS_ACTION
 
-    # Monitor: wait for VPS to come back online
+    # Monitor VPS
     vps_ip = data["vps_ip"]
-    vps_port = data.get("vps_port", 22)
     os_type = data["os_type"]
     check_port = 3389 if os_type == "windows" else 22
 
-    # Loading: waiting for reboot
-    await query.edit_message_text(
-        "─────────────────────────────\n"
-        "  ⚙️  OS Installation Service\n"
-        "─────────────────────────────\n\n"
-        f"  🎯 {data['vps_ip']}\n"
-        f"  📦 {data['os_name']}\n"
-        f"  🔤 {data.get('lang', 'N/A') if os_type == 'windows' else 'N/A'}\n\n"
-        "─────────────────────────────\n\n"
-        "  ● SSH Connection      DONE\n"
-        "  ● Download Script     DONE\n"
-        "  ● Run Installer       DONE\n"
-        "  ◐ Installing OS       IN PROGRESS\n"
-        "  ○ Final Check         WAITING\n\n"
-        "  ┃░░░░░░░░░░░░░░░░░░┃ 0%\n\n"
-        "  ⏱ Elapsed: 0 min\n"
-        "  ⏳ Remaining: ~15-30 min\n\n"
-        "─────────────────────────────"
-    )
-
     await asyncio.sleep(30)
 
-    # Wait for VPS to come back online (max 30 minutes)
     online = False
-    for i in range(60):  # 60 * 30s = 30 minutes max
+    for i in range(60):
         await asyncio.sleep(30)
-
         elapsed = int((_time.time() - start_time) / 60)
-        # Calculate progress bar (estimate based on time, max 90%)
-        progress_pct = min(int((elapsed / 20) * 100), 90) if elapsed < 20 else 90
+        progress_pct = min(int((elapsed / 20) * 100), 90)
         filled = int(progress_pct / 5.5)
         bar = "█" * filled + "░" * (18 - filled)
 
-        # Update loading message every 2 minutes
         if i % 4 == 0:
             try:
                 await query.edit_message_text(
@@ -410,9 +600,7 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             except Exception:
                 pass
 
-        # Check if target port is open
         try:
-            import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
             result = sock.connect_ex((vps_ip, check_port))
@@ -425,7 +613,6 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elapsed_final = int((_time.time() - start_time) / 60)
 
-    # Final message
     if online:
         if os_type == "windows":
             await query.edit_message_text(
@@ -435,645 +622,347 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"  🎯 {data['vps_ip']}\n"
                 f"  📦 {data['os_name']}\n"
                 f"  ⏱ {elapsed_final} min\n\n"
-                "─────────────────────────────\n\n"
-                "  ● SSH Connection      DONE\n"
-                "  ● Download Script     DONE\n"
-                "  ● Run Installer       DONE\n"
-                "  ● Installing OS       DONE\n"
-                "  ● Final Check         DONE\n\n"
                 "  ┃██████████████████┃ 100%\n\n"
                 "─────────────────────────────\n\n"
                 "  🔑 LOGIN:\n"
                 f"  Host: {data['vps_ip']}:3389\n"
                 "  User: Administrator\n"
                 "  Pass: Teddysun.com\n\n"
-                "─────────────────────────────\n\n"
-                "/start untuk reinstall lagi"
+                "─────────────────────────────",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]),
             )
         else:
-            # Fix Linux: enable root login and set password
+            # Auto-fix Linux password
             await asyncio.sleep(10)
-            fix_success = False
-            default_passwords = ['Bolehtuh1', 'LeitboGi0662', 'Teddysun.com', 'teddysun.com', '']
-            default_users = ['root', 'ubuntu', 'debian']
+            fix_success = await fix_linux_password(vps_ip, data)
+            pass_info = "  Pass: Bolehtuh1" if fix_success else "  Pass: Bolehtuh1 atau LeitboGi0662"
+            fix_status = "● Root Login          FIXED" if fix_success else "⚠ Root Login          CHECK"
 
-            try:
-                fix_ssh = paramiko.SSHClient()
-                fix_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-                connected = False
-                for user in default_users:
-                    if connected:
-                        break
-                    for pwd in default_passwords:
-                        try:
-                            fix_ssh.connect(
-                                hostname=vps_ip, port=22,
-                                username=user, password=pwd,
-                                timeout=10, allow_agent=False, look_for_keys=False,
-                            )
-                            connected = True
-                            logger.info(f"Linux fix: connected as {user} with password '{pwd}'")
-                            break
-                        except Exception:
-                            continue
-
-                if connected:
-                    fix_commands = (
-                        "echo 'root:Bolehtuh1' | sudo chpasswd 2>/dev/null; "
-                        "echo 'root:Bolehtuh1' | chpasswd 2>/dev/null; "
-                        "sudo sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
-                        "sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
-                        "sudo sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
-                        "sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
-                        "sudo systemctl restart sshd 2>/dev/null; "
-                        "sudo service ssh restart 2>/dev/null; "
-                        "systemctl restart sshd 2>/dev/null; "
-                        "service ssh restart 2>/dev/null; "
-                        "echo 'FIX_DONE'"
-                    )
-                    stdin, stdout, stderr = fix_ssh.exec_command(fix_commands)
-                    stdout.channel.settimeout(15)
-                    fix_output = stdout.read().decode('utf-8', errors='ignore').strip()
-                    logger.info(f"Linux fix output: {fix_output}")
-                    if "FIX_DONE" in fix_output:
-                        fix_success = True
-                    fix_ssh.close()
-                else:
-                    logger.info("Linux fix: could not connect with any default password")
-            except Exception as e:
-                logger.info(f"Linux fix error: {e}")
-
-            if fix_success:
-                await query.edit_message_text(
-                    "─────────────────────────────\n"
-                    "  ✅  OS Installation Complete\n"
-                    "─────────────────────────────\n\n"
-                    f"  🎯 {data['vps_ip']}\n"
-                    f"  📦 {data['os_name']}\n"
-                    f"  ⏱ {elapsed_final} min\n\n"
-                    "─────────────────────────────\n\n"
-                    "  ● SSH Connection      DONE\n"
-                    "  ● Download Script     DONE\n"
-                    "  ● Run Installer       DONE\n"
-                    "  ● Installing OS       DONE\n"
-                    "  ● Final Check         DONE\n"
-                    "  ● Root Login          FIXED\n\n"
-                    "  ┃██████████████████┃ 100%\n\n"
-                    "─────────────────────────────\n\n"
-                    "  🔑 LOGIN:\n"
-                    f"  Host: ssh root@{data['vps_ip']}\n"
-                    "  Pass: Bolehtuh1\n\n"
-                    "─────────────────────────────\n\n"
-                    "/start untuk reinstall lagi"
-                )
-            else:
-                await query.edit_message_text(
-                    "─────────────────────────────\n"
-                    "  ✅  OS Installed (Check Pass)\n"
-                    "─────────────────────────────\n\n"
-                    f"  🎯 {data['vps_ip']}\n"
-                    f"  📦 {data['os_name']}\n"
-                    f"  ⏱ {elapsed_final} min\n\n"
-                    "─────────────────────────────\n\n"
-                    "  ● SSH Connection      DONE\n"
-                    "  ● Download Script     DONE\n"
-                    "  ● Run Installer       DONE\n"
-                    "  ● Installing OS       DONE\n"
-                    "  ● Final Check         DONE\n"
-                    "  ⚠ Root Login          CHECK\n\n"
-                    "  ┃██████████████████┃ 100%\n\n"
-                    "─────────────────────────────\n\n"
-                    "  🔑 LOGIN:\n"
-                    f"  Host: ssh root@{data['vps_ip']}\n"
-                    "  Pass: Bolehtuh1\n"
-                    "  Alt : LeitboGi0662\n\n"
-                    "─────────────────────────────\n\n"
-                    "/start untuk reinstall lagi"
-                )
+            await query.edit_message_text(
+                "─────────────────────────────\n"
+                "  ✅  OS Installation Complete\n"
+                "─────────────────────────────\n\n"
+                f"  🎯 {data['vps_ip']}\n"
+                f"  📦 {data['os_name']}\n"
+                f"  ⏱ {elapsed_final} min\n\n"
+                f"  ┃██████████████████┃ 100%\n"
+                f"  {fix_status}\n\n"
+                "─────────────────────────────\n\n"
+                "  🔑 LOGIN:\n"
+                f"  Host: ssh root@{data['vps_ip']}\n"
+                f"{pass_info}\n\n"
+                "─────────────────────────────",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]),
+            )
     else:
-        elapsed_final = int((_time.time() - start_time) / 60)
         await query.edit_message_text(
             "─────────────────────────────\n"
             "  ⚠️  Installation Timeout\n"
             "─────────────────────────────\n\n"
             f"  🎯 {data['vps_ip']}\n"
             f"  📦 {data['os_name']}\n"
-            f"  ⏱ {elapsed_final} min (timeout)\n\n"
-            "─────────────────────────────\n\n"
-            "  ● SSH Connection      DONE\n"
-            "  ● Download Script     DONE\n"
-            "  ● Run Installer       DONE\n"
-            "  ⚠ Installing OS       TIMEOUT\n"
-            "  ○ Final Check         SKIPPED\n\n"
-            "─────────────────────────────\n\n"
+            f"  ⏱ {elapsed_final} min\n\n"
             "  Kemungkinan masih install.\n"
-            "  Cek VNC console di panel hosting.\n\n"
-            "─────────────────────────────\n\n"
-            "/start untuk coba lagi"
+            "  Cek VNC console.\n\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]),
         )
 
-    return ConversationHandler.END
+    return SELECT_VPS_ACTION
+
+
+
+async def fix_linux_password(vps_ip: str, data: dict) -> bool:
+    """Try to fix Linux root password after install."""
+    default_passwords = ['Bolehtuh1', 'LeitboGi0662', 'Teddysun.com', 'teddysun.com', '']
+    default_users = ['root', 'ubuntu', 'debian']
+    try:
+        fix_ssh = paramiko.SSHClient()
+        fix_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        connected = False
+        for user in default_users:
+            if connected:
+                break
+            for pwd in default_passwords:
+                try:
+                    fix_ssh.connect(hostname=vps_ip, port=22, username=user, password=pwd,
+                                    timeout=10, allow_agent=False, look_for_keys=False)
+                    connected = True
+                    break
+                except Exception:
+                    continue
+        if connected:
+            fix_commands = (
+                "echo 'root:Bolehtuh1' | sudo chpasswd 2>/dev/null; "
+                "echo 'root:Bolehtuh1' | chpasswd 2>/dev/null; "
+                "sudo sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                "sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                "sudo sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                "sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                "sudo systemctl restart sshd 2>/dev/null; sudo service ssh restart 2>/dev/null; "
+                "systemctl restart sshd 2>/dev/null; service ssh restart 2>/dev/null; echo 'FIX_DONE'"
+            )
+            stdin, stdout, stderr = fix_ssh.exec_command(fix_commands)
+            stdout.channel.settimeout(15)
+            output = stdout.read().decode('utf-8', errors='ignore')
+            fix_ssh.close()
+            return "FIX_DONE" in output
+    except Exception as e:
+        logger.info(f"Linux fix error: {e}")
+    return False
 
 
 async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
-    """Connect to VPS via SSH and run the install command."""
+    """Connect to VPS and run install."""
     try:
-        # Build the install command
         if data["os_type"] == "windows":
-            # Windows always uses leitbogioro
-            install_script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
-            download_cmd = (
-                f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{install_script_url}' "
-                "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-            )
-            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -pwd Bolehtuh1 -firmware"
-            run_cmd = f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
+            url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
+            dl_cmd = f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{url}' && chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
+            run_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -pwd Bolehtuh1 -firmware > /tmp/reinstall.log 2>&1; reboot"
         elif data.get("os_engine") == "bin456789":
-            # Ubuntu uses bin456789 (reliable password)
-            install_script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
-            download_cmd = (
-                f"wget --no-check-certificate -qO /tmp/reinstall.sh '{install_script_url}' "
-                "&& chmod a+x /tmp/reinstall.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-            )
+            url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+            dl_cmd = f"wget --no-check-certificate -qO /tmp/reinstall.sh '{url}' && chmod a+x /tmp/reinstall.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
             run_cmd = f"bash /tmp/reinstall.sh {data['os_cmd']} --password Bolehtuh1 > /tmp/reinstall.log 2>&1; reboot"
         else:
-            # Debian, CentOS, AlmaLinux use leitbogioro (fast)
-            install_script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
-            download_cmd = (
-                f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{install_script_url}' "
-                "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-            )
-            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd Bolehtuh1 -firmware"
-            run_cmd = f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
+            url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
+            dl_cmd = f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{url}' && chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
+            run_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -pwd Bolehtuh1 -firmware > /tmp/reinstall.log 2>&1; reboot"
 
-        # Loading: Step 1 - Connecting
+        # Step 1: Connect
         await query.edit_message_text(
             "─────────────────────────────\n"
             "  ⚙️  OS Installation Service\n"
             "─────────────────────────────\n\n"
-            f"  🎯 {data['vps_ip']}\n"
-            f"  📦 {data['os_name']}\n\n"
-            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n  📦 {data['os_name']}\n\n"
             "  ◐ SSH Connection      CONNECTING\n"
             "  ○ Download Script     WAITING\n"
-            "  ○ Run Installer       WAITING\n"
-            "  ○ Installing OS       WAITING\n"
-            "  ○ Final Check         WAITING\n\n"
+            "  ○ Run Installer       WAITING\n\n"
             "  ┃░░░░░░░░░░░░░░░░░░┃ 0%\n\n"
             "─────────────────────────────"
         )
 
-        # Connect via SSH
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=data["vps_ip"],
-            port=data["vps_port"],
-            username=data["vps_user"],
-            password=data["vps_pass"],
-            timeout=30,
-            allow_agent=False,
-            look_for_keys=False,
-        )
+        ssh.connect(hostname=data["vps_ip"], port=data["vps_port"], username=data["vps_user"],
+                    password=data["vps_pass"], timeout=30, allow_agent=False, look_for_keys=False)
 
-        # Loading: Step 2 - Downloading
+        # Step 2: Download
         await query.edit_message_text(
             "─────────────────────────────\n"
             "  ⚙️  OS Installation Service\n"
             "─────────────────────────────\n\n"
-            f"  🎯 {data['vps_ip']}\n"
-            f"  📦 {data['os_name']}\n\n"
-            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n  📦 {data['os_name']}\n\n"
             "  ● SSH Connection      DONE\n"
             "  ◐ Download Script     DOWNLOADING\n"
-            "  ○ Run Installer       WAITING\n"
-            "  ○ Installing OS       WAITING\n"
-            "  ○ Final Check         WAITING\n\n"
+            "  ○ Run Installer       WAITING\n\n"
             "  ┃███░░░░░░░░░░░░░░░┃ 15%\n\n"
             "─────────────────────────────"
         )
 
-        # Step 1: Download install script and wait for it to finish
-        logger.info(f"Downloading script to {data['vps_ip']}...")
-        stdin, stdout, stderr = ssh.exec_command(download_cmd)
-        # Wait for download to complete (max 60s)
+        stdin, stdout, stderr = ssh.exec_command(dl_cmd)
         stdout.channel.settimeout(60)
         output = stdout.read().decode('utf-8', errors='ignore').strip()
-        logger.info(f"Download result: {output}")
-
         if "DOWNLOAD_OK" not in output:
-            context.user_data["error_msg"] = f"Gagal download script: {output}"
+            context.user_data["error_msg"] = f"Download gagal: {output}"
             ssh.close()
             return False
 
-        # Loading: Step 3 - Running installer
+        # Step 3: Run
         await query.edit_message_text(
             "─────────────────────────────\n"
             "  ⚙️  OS Installation Service\n"
             "─────────────────────────────\n\n"
-            f"  🎯 {data['vps_ip']}\n"
-            f"  📦 {data['os_name']}\n\n"
-            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n  📦 {data['os_name']}\n\n"
             "  ● SSH Connection      DONE\n"
             "  ● Download Script     DONE\n"
-            "  ◐ Run Installer       RUNNING\n"
-            "  ○ Installing OS       WAITING\n"
-            "  ○ Final Check         WAITING\n\n"
+            "  ◐ Run Installer       RUNNING\n\n"
             "  ┃██████░░░░░░░░░░░░┃ 30%\n\n"
             "─────────────────────────────"
         )
 
-        # Step 2: Run install and reboot after completion
-        logger.info(f"Running install: {run_cmd}")
         channel = ssh.get_transport().open_session()
         channel.exec_command(run_cmd)
-
-        # Wait for script to download images and setup grub
         await asyncio.sleep(20)
-
-        # Step 3: Check log to see progress
-        try:
-            stdin3, stdout3, stderr3 = ssh.exec_command("tail -10 /tmp/reinstall.log 2>/dev/null")
-            await asyncio.sleep(3)
-            check_output = stdout3.read().decode('utf-8', errors='ignore').strip()
-            logger.info(f"Check output: {check_output}")
-        except Exception:
-            logger.info("SSH connection lost - VPS is rebooting (good!)")
 
         try:
             ssh.close()
         except Exception:
             pass
-
         return True
 
     except paramiko.AuthenticationException:
         context.user_data["error_msg"] = "Username atau password salah"
-        logger.error("SSH Auth Error: Authentication failed")
         return False
-    except paramiko.ssh_exception.NoValidConnectionsError as e:
+    except paramiko.ssh_exception.NoValidConnectionsError:
         context.user_data["error_msg"] = f"Port {data['vps_port']} tidak bisa diakses"
-        logger.error(f"SSH Connection Error: {e}")
-        return False
-    except TimeoutError:
-        context.user_data["error_msg"] = "Timeout - VPS tidak merespon (offline?)"
-        logger.error("SSH Timeout Error")
         return False
     except Exception as e:
         context.user_data["error_msg"] = str(e)
-        logger.error(f"SSH Error: {e}")
         return False
 
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check if VPS is online (ping test)."""
+
+# ============ Standalone Commands ============
+
+async def cmd_ssh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Standalone /ssh command."""
     if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("Tidak ada akses.")
         return
-
-    vps_ip = context.user_data.get("vps_ip")
-    if not vps_ip:
-        await update.message.reply_text(
-            "Belum ada VPS yang terdaftar.\n"
-            "Gunakan /start untuk memulai."
-        )
+    data = context.user_data
+    if not data.get("vps_ip"):
+        await update.message.reply_text("Gunakan /start untuk pilih VPS dulu.")
         return
+    cmd_text = update.message.text.replace("/ssh", "").strip()
+    if not cmd_text:
+        await update.message.reply_text("Cara: /ssh <command>\nContoh: /ssh uptime")
+        return
+    result = await ssh_exec(data, cmd_text)
+    if len(result) > 3000:
+        result = result[:3000] + "\n..."
+    await update.message.reply_text(f"💻 {cmd_text}\n\n{result}")
 
-    await update.message.reply_text(f"Mengecek status {vps_ip}...")
 
-    # Ping test
-    result = await asyncio.create_subprocess_exec(
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Standalone /info command."""
+    if not is_authorized(update.effective_user.id):
+        return
+    data = context.user_data
+    if not data.get("vps_ip"):
+        await update.message.reply_text("Gunakan /start untuk pilih VPS dulu.")
+        return
+    info = await get_vps_system_info(data)
+    await update.message.reply_text(info)
+
+
+async def cmd_reboot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Standalone /reboot command."""
+    if not is_authorized(update.effective_user.id):
+        return
+    data = context.user_data
+    if not data.get("vps_ip"):
+        await update.message.reply_text("Gunakan /start untuk pilih VPS dulu.")
+        return
+    await ssh_exec(data, "reboot")
+    await update.message.reply_text(f"🔄 Reboot sent ke {data['vps_ip']}")
+
+
+async def cmd_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Standalone /shutdown command."""
+    if not is_authorized(update.effective_user.id):
+        return
+    data = context.user_data
+    if not data.get("vps_ip"):
+        await update.message.reply_text("Gunakan /start untuk pilih VPS dulu.")
+        return
+    await ssh_exec(data, "shutdown -h now")
+    await update.message.reply_text(f"⏹ Shutdown sent ke {data['vps_ip']}")
+
+
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Standalone /status command."""
+    if not is_authorized(update.effective_user.id):
+        return
+    data = context.user_data
+    if not data.get("vps_ip"):
+        await update.message.reply_text("Gunakan /start untuk pilih VPS dulu.")
+        return
+    vps_ip = data["vps_ip"]
+    proc = await asyncio.create_subprocess_exec(
         "ping", "-c", "3", "-W", "5", vps_ip,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
-    stdout, _ = await result.communicate()
-
-    if result.returncode == 0:
-        await update.message.reply_text(
-            f"VPS {vps_ip} ONLINE!\n\n"
-            "Coba login sekarang:\n"
-            f"  RDP: {vps_ip}:3389 (Windows)\n"
-            f"  SSH: ssh root@{vps_ip} (Linux)"
-        )
+    await proc.communicate()
+    if proc.returncode == 0:
+        await update.message.reply_text(f"✅ {vps_ip} ONLINE")
     else:
-        await update.message.reply_text(
-            f"VPS {vps_ip} masih OFFLINE.\n"
-            "Mungkin masih dalam proses instalasi.\n"
-            "Coba lagi dalam beberapa menit."
-        )
+        await update.message.reply_text(f"❌ {vps_ip} OFFLINE")
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Help command."""
+    await update.message.reply_text(
+        "─────────────────────────────\n"
+        "  🖥️  Reinstall OS Bot v2.0\n"
+        "─────────────────────────────\n\n"
+        "Perintah:\n"
+        "  /start    - Menu VPS\n"
+        "  /info     - Info VPS\n"
+        "  /ssh CMD  - SSH command\n"
+        "  /reboot   - Reboot VPS\n"
+        "  /shutdown - Shutdown VPS\n"
+        "  /status   - Cek online\n"
+        "  /help     - Bantuan\n\n"
+        "Password:\n"
+        "  Windows: Teddysun.com\n"
+        "  Linux: Bolehtuh1\n\n"
+        "─────────────────────────────"
+    )
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Cancel the conversation."""
-    await update.message.reply_text("Dibatalkan. Gunakan /start untuk mulai lagi.")
+    await update.message.reply_text("Dibatalkan. /start untuk mulai lagi.")
     return ConversationHandler.END
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show help message."""
-    await update.message.reply_text(
-        "Reinstall OS Bot - by xyzval\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "Cara pakai:\n"
-        "1. Kirim /start\n"
-        "2. Kirim detail VPS: ip password\n"
-        "3. Pilih OS\n"
-        "4. Selesai!\n\n"
-        "Format detail VPS:\n"
-        "  ip password\n"
-        "  ip port password\n"
-        "  ip port username password\n\n"
-        "Contoh:\n"
-        "  103.1.2.3 MyPass123\n"
-        "  103.1.2.3 22 root MyPass123\n\n"
-        "Perintah:\n"
-        "  /start    - Mulai reinstall OS\n"
-        "  /status   - Cek VPS online/offline\n"
-        "  /info     - Info VPS (RAM, Disk, Uptime)\n"
-        "  /ssh CMD  - Jalankan command di VPS\n"
-        "  /reboot   - Reboot VPS\n"
-        "  /shutdown  - Shutdown VPS\n"
-        "  /cancel   - Batalkan proses\n"
-        "  /help     - Bantuan\n\n"
-        "OS tersedia:\n"
-        "  Windows: 10, 11, Server 2012-2022\n"
-        "  Linux: Debian, Ubuntu, CentOS, dll\n\n"
-        "Login default:\n"
-        "  Windows: Administrator / Teddysun.com\n"
-        "  Linux: root / Bolehtuh1"
-    )
 
+# ============ Main ============
 
-async def ssh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Execute SSH command on the last used VPS."""
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("Tidak ada akses.")
-        return
-
-    vps_ip = context.user_data.get("vps_ip")
-    vps_port = context.user_data.get("vps_port", 22)
-    vps_user = context.user_data.get("vps_user", "root")
-    vps_pass = context.user_data.get("vps_pass")
-
-    if not vps_ip or not vps_pass:
-        await update.message.reply_text(
-            "Belum ada VPS yang terdaftar.\n"
-            "Gunakan /start dulu untuk set VPS."
-        )
-        return
-
-    # Get command from message
-    cmd_text = update.message.text.replace("/ssh", "").strip()
-    if not cmd_text:
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  💻  SSH Command\n"
-            "─────────────────────────────\n\n"
-            "Cara pakai:\n"
-            "  /ssh <command>\n\n"
-            "Contoh:\n"
-            "  /ssh uptime\n"
-            "  /ssh df -h\n"
-            "  /ssh free -m\n"
-            "  /ssh apt update\n"
-            "  /ssh ls /root\n\n"
-            f"VPS: {vps_ip}:{vps_port}"
-        )
-        return
-
-    await update.message.reply_text(f"⏳ Menjalankan: `{cmd_text}`...", parse_mode="Markdown")
-
-    try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=vps_ip, port=vps_port,
-            username=vps_user, password=vps_pass,
-            timeout=15, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = ssh.exec_command(cmd_text)
-        stdout.channel.settimeout(30)
-        output = stdout.read().decode('utf-8', errors='ignore').strip()
-        error = stderr.read().decode('utf-8', errors='ignore').strip()
-        ssh.close()
-
-        result = output if output else error if error else "(no output)"
-        # Truncate if too long
-        if len(result) > 3000:
-            result = result[:3000] + "\n\n... (truncated)"
-
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  💻  SSH Command Result\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {vps_ip}\n"
-            f"  ⌨️  {cmd_text}\n\n"
-            "─────────────────────────────\n\n"
-            f"{result}"
-        )
-    except Exception as e:
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  ❌  SSH Command Failed\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {vps_ip}\n"
-            f"  Error: {str(e)}"
-        )
-
-
-async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Get VPS system info."""
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("Tidak ada akses.")
-        return
-
-    vps_ip = context.user_data.get("vps_ip")
-    vps_port = context.user_data.get("vps_port", 22)
-    vps_user = context.user_data.get("vps_user", "root")
-    vps_pass = context.user_data.get("vps_pass")
-
-    if not vps_ip or not vps_pass:
-        await update.message.reply_text(
-            "Belum ada VPS yang terdaftar.\n"
-            "Gunakan /start dulu untuk set VPS."
-        )
-        return
-
-    await update.message.reply_text(f"⏳ Mengambil info {vps_ip}...")
-
-    try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=vps_ip, port=vps_port,
-            username=vps_user, password=vps_pass,
-            timeout=15, allow_agent=False, look_for_keys=False,
-        )
-
-        # Get system info
-        info_cmd = (
-            "echo \"OS: $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'\"' -f2)\";"
-            "echo \"Kernel: $(uname -r)\";"
-            "echo \"Uptime: $(uptime -p 2>/dev/null || uptime)\";"
-            "echo \"CPU: $(nproc) cores\";"
-            "echo \"RAM: $(free -m | awk '/Mem:/ {printf \"%dMB / %dMB (%.0f%%)\", $3, $2, $3/$2*100}')\";"
-            "echo \"Disk: $(df -h / | awk 'NR==2 {printf \"%s / %s (%s)\", $3, $2, $5}')\";"
-            "echo \"IP: $(curl -s4 ip.sb 2>/dev/null || echo 'N/A')\";"
-            "echo \"Load: $(cat /proc/loadavg | awk '{print $1, $2, $3}')\""
-        )
-        stdin, stdout, stderr = ssh.exec_command(info_cmd)
-        stdout.channel.settimeout(15)
-        output = stdout.read().decode('utf-8', errors='ignore').strip()
-        ssh.close()
-
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  📊  VPS System Info\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {vps_ip}:{vps_port}\n\n"
-            "─────────────────────────────\n\n"
-            f"{output}\n\n"
-            "─────────────────────────────"
-        )
-    except Exception as e:
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  ❌  Cannot Get Info\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {vps_ip}\n"
-            f"  Error: {str(e)}"
-        )
-
-
-async def reboot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Reboot VPS."""
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("Tidak ada akses.")
-        return
-
-    vps_ip = context.user_data.get("vps_ip")
-    vps_port = context.user_data.get("vps_port", 22)
-    vps_user = context.user_data.get("vps_user", "root")
-    vps_pass = context.user_data.get("vps_pass")
-
-    if not vps_ip or not vps_pass:
-        await update.message.reply_text(
-            "Belum ada VPS yang terdaftar.\n"
-            "Gunakan /start dulu untuk set VPS."
-        )
-        return
-
-    try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=vps_ip, port=vps_port,
-            username=vps_user, password=vps_pass,
-            timeout=15, allow_agent=False, look_for_keys=False,
-        )
-        ssh.exec_command("reboot")
-        ssh.close()
-
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  🔄  VPS Rebooting\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {vps_ip}\n"
-            "  Status: Reboot command sent!\n\n"
-            "  VPS akan online dalam 1-3 menit.\n"
-            "  Gunakan /status untuk cek.\n\n"
-            "─────────────────────────────"
-        )
-    except Exception as e:
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  ❌  Reboot Failed\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {vps_ip}\n"
-            f"  Error: {str(e)}"
-        )
-
-
-async def shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Shutdown VPS."""
-    if not is_authorized(update.effective_user.id):
-        await update.message.reply_text("Tidak ada akses.")
-        return
-
-    vps_ip = context.user_data.get("vps_ip")
-    vps_port = context.user_data.get("vps_port", 22)
-    vps_user = context.user_data.get("vps_user", "root")
-    vps_pass = context.user_data.get("vps_pass")
-
-    if not vps_ip or not vps_pass:
-        await update.message.reply_text(
-            "Belum ada VPS yang terdaftar.\n"
-            "Gunakan /start dulu untuk set VPS."
-        )
-        return
-
-    try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=vps_ip, port=vps_port,
-            username=vps_user, password=vps_pass,
-            timeout=15, allow_agent=False, look_for_keys=False,
-        )
-        ssh.exec_command("shutdown -h now")
-        ssh.close()
-
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  ⏹️  VPS Shutting Down\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {vps_ip}\n"
-            "  Status: Shutdown command sent!\n\n"
-            "  VPS akan mati dalam beberapa detik.\n\n"
-            "─────────────────────────────"
-        )
-    except Exception as e:
-        await update.message.reply_text(
-            "─────────────────────────────\n"
-            "  ❌  Shutdown Failed\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {vps_ip}\n"
-            f"  Error: {str(e)}"
-        )
+async def post_init(application):
+    """Set bot commands menu."""
+    commands = [
+        BotCommand("start", "Menu VPS"),
+        BotCommand("info", "Info VPS"),
+        BotCommand("ssh", "SSH command"),
+        BotCommand("reboot", "Reboot VPS"),
+        BotCommand("shutdown", "Shutdown VPS"),
+        BotCommand("status", "Cek online/offline"),
+        BotCommand("help", "Bantuan"),
+    ]
+    await application.bot.set_my_commands(commands)
 
 
 def main() -> None:
-    """Run the bot."""
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN not set!")
-        print("Buat file .env dan isi: BOT_TOKEN=your_bot_token_here")
         return
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Conversation handler
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            VPS_DETAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_vps_detail)],
-            SELECT_OS: [CallbackQueryHandler(select_os, pattern="^os_"),
-                        CallbackQueryHandler(select_os_category, pattern="^(cat_|back_)")],
+            ADD_VPS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_vps_handler)],
+            SELECT_VPS_ACTION: [
+                CallbackQueryHandler(select_vps, pattern="^(selvps_|addvps)"),
+                CallbackQueryHandler(handle_action, pattern="^act_"),
+                CallbackQueryHandler(select_os_category, pattern="^cat_"),
+            ],
+            SELECT_OS: [
+                CallbackQueryHandler(select_os, pattern="^os_"),
+                CallbackQueryHandler(select_os_category, pattern="^cat_"),
+                CallbackQueryHandler(handle_action, pattern="^act_"),
+            ],
             SELECT_LANG: [CallbackQueryHandler(select_lang, pattern="^lang_")],
-            CONFIRM: [CallbackQueryHandler(confirm_install, pattern="^confirm_")],
+            CONFIRM: [
+                CallbackQueryHandler(confirm_install, pattern="^confirm_"),
+                CallbackQueryHandler(handle_action, pattern="^act_"),
+            ],
+            SSH_CMD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, ssh_cmd_handler),
+                CallbackQueryHandler(handle_action, pattern="^act_"),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
         allow_reentry=True,
     )
 
     app.add_handler(conv_handler)
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("info", info_command))
-    app.add_handler(CommandHandler("ssh", ssh_command))
-    app.add_handler(CommandHandler("reboot", reboot_command))
-    app.add_handler(CommandHandler("shutdown", shutdown_command))
-    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("info", cmd_info))
+    app.add_handler(CommandHandler("ssh", cmd_ssh))
+    app.add_handler(CommandHandler("reboot", cmd_reboot))
+    app.add_handler(CommandHandler("shutdown", cmd_shutdown))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("help", cmd_help))
 
     print("Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
