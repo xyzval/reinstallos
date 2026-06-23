@@ -52,6 +52,8 @@ WINDOWS_OPTIONS = {
 LINUX_OPTIONS = {
     "debian12": {"name": "Debian 12", "cmd": '-debian 12', "engine": "leitbogioro"},
     "debian11": {"name": "Debian 11", "cmd": '-debian 11', "engine": "leitbogioro"},
+    "debian10": {"name": "Debian 10", "cmd": '-debian 10', "engine": "leitbogioro"},
+    "debian9": {"name": "Debian 9", "cmd": '-debian 9', "engine": "leitbogioro"},
     "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": 'ubuntu 22.04', "engine": "bin456789"},
     "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": 'ubuntu 20.04', "engine": "bin456789"},
     "centos9": {"name": "CentOS 9 Stream", "cmd": '-centos 9', "engine": "leitbogioro"},
