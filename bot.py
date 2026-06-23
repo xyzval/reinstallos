@@ -289,13 +289,13 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
             "\nLogin setelah selesai:\n"
             f"  RDP Host: {data['vps_ip']}:3389\n"
             "  Username: Administrator\n"
-            "  Password: Teddysun.com\n"
+            "  Password: Bolehtuh1\n"
         )
     else:
         summary += (
             "\nLogin setelah selesai:\n"
             f"  SSH: root@{data['vps_ip']}\n"
-            "  Password: password123\n"
+            "  Password: Bolehtuh1\n"
         )
 
     summary += (
@@ -428,7 +428,7 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "Login sekarang:\n"
                 f"  RDP Host: {data['vps_ip']}:3389\n"
                 "  Username: Administrator\n"
-                "  Password: Teddysun.com\n\n"
+                "  Password: Bolehtuh1\n\n"
                 "Gunakan /start untuk reinstall lagi."
             )
         else:
@@ -444,7 +444,7 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 f"Status: BERHASIL DIUBAH!\n\n"
                 "Login sekarang:\n"
                 f"  SSH: ssh root@{data['vps_ip']}\n"
-                "  Password: password123\n\n"
+                "  Password: Bolehtuh1\n\n"
                 "Gunakan /start untuk reinstall lagi."
             )
     else:
@@ -470,9 +470,9 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
     try:
         # Build the install command
         if data["os_type"] == "windows":
-            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -firmware"
+            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -pwd Bolehtuh1 -firmware"
         else:
-            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd Teddysun.com -firmware"
+            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd Bolehtuh1 -firmware"
 
         # Loading: Step 1 - Connecting
         await query.edit_message_text(
@@ -652,8 +652,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  Windows: 10, 11, Server 2012-2022\n"
         "  Linux: Debian, Ubuntu, CentOS, dll\n\n"
         "Login default:\n"
-        "  Windows: Administrator / Teddysun.com\n"
-        "  Linux: root / password123"
+        "  Windows: Administrator / Bolehtuh1\n"
+        "  Linux: root / Bolehtuh1"
     )
 
 
