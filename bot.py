@@ -789,10 +789,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  103.1.2.3 MyPass123\n"
         "  103.1.2.3 22 root MyPass123\n\n"
         "Perintah:\n"
-        "  /start  - Mulai reinstall\n"
-        "  /status - Cek VPS online/offline\n"
-        "  /cancel - Batalkan\n"
-        "  /help   - Bantuan\n\n"
+        "  /start    - Mulai reinstall OS\n"
+        "  /status   - Cek VPS online/offline\n"
+        "  /info     - Info VPS (RAM, Disk, Uptime)\n"
+        "  /ssh CMD  - Jalankan command di VPS\n"
+        "  /reboot   - Reboot VPS\n"
+        "  /shutdown  - Shutdown VPS\n"
+        "  /cancel   - Batalkan proses\n"
+        "  /help     - Bantuan\n\n"
         "OS tersedia:\n"
         "  Windows: 10, 11, Server 2012-2022\n"
         "  Linux: Debian, Ubuntu, CentOS, dll\n\n"
@@ -800,6 +804,244 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  Windows: Administrator / Teddysun.com\n"
         "  Linux: root / Bolehtuh1"
     )
+
+
+async def ssh_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Execute SSH command on the last used VPS."""
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("Tidak ada akses.")
+        return
+
+    vps_ip = context.user_data.get("vps_ip")
+    vps_port = context.user_data.get("vps_port", 22)
+    vps_user = context.user_data.get("vps_user", "root")
+    vps_pass = context.user_data.get("vps_pass")
+
+    if not vps_ip or not vps_pass:
+        await update.message.reply_text(
+            "Belum ada VPS yang terdaftar.\n"
+            "Gunakan /start dulu untuk set VPS."
+        )
+        return
+
+    # Get command from message
+    cmd_text = update.message.text.replace("/ssh", "").strip()
+    if not cmd_text:
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  💻  SSH Command\n"
+            "─────────────────────────────\n\n"
+            "Cara pakai:\n"
+            "  /ssh <command>\n\n"
+            "Contoh:\n"
+            "  /ssh uptime\n"
+            "  /ssh df -h\n"
+            "  /ssh free -m\n"
+            "  /ssh apt update\n"
+            "  /ssh ls /root\n\n"
+            f"VPS: {vps_ip}:{vps_port}"
+        )
+        return
+
+    await update.message.reply_text(f"⏳ Menjalankan: `{cmd_text}`...", parse_mode="Markdown")
+
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=vps_ip, port=vps_port,
+            username=vps_user, password=vps_pass,
+            timeout=15, allow_agent=False, look_for_keys=False,
+        )
+        stdin, stdout, stderr = ssh.exec_command(cmd_text)
+        stdout.channel.settimeout(30)
+        output = stdout.read().decode('utf-8', errors='ignore').strip()
+        error = stderr.read().decode('utf-8', errors='ignore').strip()
+        ssh.close()
+
+        result = output if output else error if error else "(no output)"
+        # Truncate if too long
+        if len(result) > 3000:
+            result = result[:3000] + "\n\n... (truncated)"
+
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  💻  SSH Command Result\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {vps_ip}\n"
+            f"  ⌨️  {cmd_text}\n\n"
+            "─────────────────────────────\n\n"
+            f"{result}"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ❌  SSH Command Failed\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {vps_ip}\n"
+            f"  Error: {str(e)}"
+        )
+
+
+async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Get VPS system info."""
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("Tidak ada akses.")
+        return
+
+    vps_ip = context.user_data.get("vps_ip")
+    vps_port = context.user_data.get("vps_port", 22)
+    vps_user = context.user_data.get("vps_user", "root")
+    vps_pass = context.user_data.get("vps_pass")
+
+    if not vps_ip or not vps_pass:
+        await update.message.reply_text(
+            "Belum ada VPS yang terdaftar.\n"
+            "Gunakan /start dulu untuk set VPS."
+        )
+        return
+
+    await update.message.reply_text(f"⏳ Mengambil info {vps_ip}...")
+
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=vps_ip, port=vps_port,
+            username=vps_user, password=vps_pass,
+            timeout=15, allow_agent=False, look_for_keys=False,
+        )
+
+        # Get system info
+        info_cmd = (
+            "echo \"OS: $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'\"' -f2)\";"
+            "echo \"Kernel: $(uname -r)\";"
+            "echo \"Uptime: $(uptime -p 2>/dev/null || uptime)\";"
+            "echo \"CPU: $(nproc) cores\";"
+            "echo \"RAM: $(free -m | awk '/Mem:/ {printf \"%dMB / %dMB (%.0f%%)\", $3, $2, $3/$2*100}')\";"
+            "echo \"Disk: $(df -h / | awk 'NR==2 {printf \"%s / %s (%s)\", $3, $2, $5}')\";"
+            "echo \"IP: $(curl -s4 ip.sb 2>/dev/null || echo 'N/A')\";"
+            "echo \"Load: $(cat /proc/loadavg | awk '{print $1, $2, $3}')\""
+        )
+        stdin, stdout, stderr = ssh.exec_command(info_cmd)
+        stdout.channel.settimeout(15)
+        output = stdout.read().decode('utf-8', errors='ignore').strip()
+        ssh.close()
+
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  📊  VPS System Info\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {vps_ip}:{vps_port}\n\n"
+            "─────────────────────────────\n\n"
+            f"{output}\n\n"
+            "─────────────────────────────"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ❌  Cannot Get Info\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {vps_ip}\n"
+            f"  Error: {str(e)}"
+        )
+
+
+async def reboot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reboot VPS."""
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("Tidak ada akses.")
+        return
+
+    vps_ip = context.user_data.get("vps_ip")
+    vps_port = context.user_data.get("vps_port", 22)
+    vps_user = context.user_data.get("vps_user", "root")
+    vps_pass = context.user_data.get("vps_pass")
+
+    if not vps_ip or not vps_pass:
+        await update.message.reply_text(
+            "Belum ada VPS yang terdaftar.\n"
+            "Gunakan /start dulu untuk set VPS."
+        )
+        return
+
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=vps_ip, port=vps_port,
+            username=vps_user, password=vps_pass,
+            timeout=15, allow_agent=False, look_for_keys=False,
+        )
+        ssh.exec_command("reboot")
+        ssh.close()
+
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  🔄  VPS Rebooting\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {vps_ip}\n"
+            "  Status: Reboot command sent!\n\n"
+            "  VPS akan online dalam 1-3 menit.\n"
+            "  Gunakan /status untuk cek.\n\n"
+            "─────────────────────────────"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ❌  Reboot Failed\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {vps_ip}\n"
+            f"  Error: {str(e)}"
+        )
+
+
+async def shutdown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shutdown VPS."""
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("Tidak ada akses.")
+        return
+
+    vps_ip = context.user_data.get("vps_ip")
+    vps_port = context.user_data.get("vps_port", 22)
+    vps_user = context.user_data.get("vps_user", "root")
+    vps_pass = context.user_data.get("vps_pass")
+
+    if not vps_ip or not vps_pass:
+        await update.message.reply_text(
+            "Belum ada VPS yang terdaftar.\n"
+            "Gunakan /start dulu untuk set VPS."
+        )
+        return
+
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(
+            hostname=vps_ip, port=vps_port,
+            username=vps_user, password=vps_pass,
+            timeout=15, allow_agent=False, look_for_keys=False,
+        )
+        ssh.exec_command("shutdown -h now")
+        ssh.close()
+
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ⏹️  VPS Shutting Down\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {vps_ip}\n"
+            "  Status: Shutdown command sent!\n\n"
+            "  VPS akan mati dalam beberapa detik.\n\n"
+            "─────────────────────────────"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ❌  Shutdown Failed\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {vps_ip}\n"
+            f"  Error: {str(e)}"
+        )
 
 
 def main() -> None:
@@ -827,6 +1069,10 @@ def main() -> None:
 
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("info", info_command))
+    app.add_handler(CommandHandler("ssh", ssh_command))
+    app.add_handler(CommandHandler("reboot", reboot_command))
+    app.add_handler(CommandHandler("shutdown", shutdown_command))
     app.add_handler(CommandHandler("help", help_command))
 
     print("Bot is running...")
