@@ -564,7 +564,7 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle install confirmation."""
+    """Handle install confirmation - runs monitoring in background."""
     query = update.callback_query
     await query.answer()
 
@@ -576,8 +576,7 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return SELECT_VPS_ACTION
 
-    data = context.user_data
-    start_time = _time.time()
+    data = dict(context.user_data)  # Copy data for background task
 
     success = await run_install(query, context, data)
 
@@ -592,7 +591,22 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return SELECT_VPS_ACTION
 
-    # Monitor VPS
+    # Launch monitoring in background task (bot stays free)
+    chat_id = query.message.chat_id
+    message_id = query.message.message_id
+    bot = query.get_bot()
+
+    asyncio.create_task(
+        monitor_install_background(bot, chat_id, message_id, data)
+    )
+
+    # Conversation ends immediately - bot is free to respond to other commands
+    return ConversationHandler.END
+
+
+async def monitor_install_background(bot, chat_id: int, message_id: int, data: dict):
+    """Background task: monitor VPS until online, update progress bar."""
+    start_time = _time.time()
     vps_ip = data["vps_ip"]
     os_type = data["os_type"]
     check_port = 3389 if os_type == "windows" else 22
@@ -600,35 +614,41 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await asyncio.sleep(30)
 
     online = False
-    for i in range(60):
+    for i in range(60):  # max 30 minutes
         await asyncio.sleep(30)
         elapsed = int((_time.time() - start_time) / 60)
         progress_pct = min(int((elapsed / 20) * 100), 90)
         filled = int(progress_pct / 5.5)
         bar = "█" * filled + "░" * (18 - filled)
 
+        # Update progress every 2 minutes
         if i % 4 == 0:
             try:
-                await query.edit_message_text(
-                    "─────────────────────────────\n"
-                    "  ⚙️  OS Installation Service\n"
-                    "─────────────────────────────\n\n"
-                    f"  🎯 {data['vps_ip']}\n"
-                    f"  📦 {data['os_name']}\n\n"
-                    "─────────────────────────────\n\n"
-                    "  ● SSH Connection      DONE\n"
-                    "  ● Download Script     DONE\n"
-                    "  ● Run Installer       DONE\n"
-                    "  ◐ Installing OS       IN PROGRESS\n"
-                    "  ○ Final Check         WAITING\n\n"
-                    f"  ┃{bar}┃ {progress_pct}%\n\n"
-                    f"  ⏱ Elapsed: {elapsed} min\n"
-                    f"  ⏳ Remaining: ~{max(15 - elapsed, 2)} min\n\n"
-                    "─────────────────────────────"
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=(
+                        "─────────────────────────────\n"
+                        "  ⚙️  OS Installation Service\n"
+                        "─────────────────────────────\n\n"
+                        f"  🎯 {data['vps_ip']}\n"
+                        f"  📦 {data['os_name']}\n\n"
+                        "─────────────────────────────\n\n"
+                        "  ● SSH Connection      DONE\n"
+                        "  ● Download Script     DONE\n"
+                        "  ● Run Installer       DONE\n"
+                        "  ◐ Installing OS       IN PROGRESS\n"
+                        "  ○ Final Check         WAITING\n\n"
+                        f"  ┃{bar}┃ {progress_pct}%\n\n"
+                        f"  ⏱ Elapsed: {elapsed} min\n"
+                        f"  ⏳ Remaining: ~{max(15 - elapsed, 2)} min\n\n"
+                        "─────────────────────────────"
+                    ),
                 )
             except Exception:
                 pass
 
+        # Check if port is open
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(5)
@@ -642,62 +662,72 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     elapsed_final = int((_time.time() - start_time) / 60)
 
+    # Send final result
     if online:
         if os_type == "windows":
-            await query.edit_message_text(
-                "─────────────────────────────\n"
-                "  ✅  OS Installation Complete\n"
-                "─────────────────────────────\n\n"
-                f"  🎯 {data['vps_ip']}\n"
-                f"  📦 {data['os_name']}\n"
-                f"  ⏱ {elapsed_final} min\n\n"
-                "  ┃██████████████████┃ 100%\n\n"
-                "─────────────────────────────\n\n"
-                "  🔑 LOGIN:\n"
-                f"  Host: {data['vps_ip']}:3389\n"
-                "  User: Administrator\n"
-                "  Pass: Teddysun.com\n\n"
-                "─────────────────────────────",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]),
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=(
+                    "─────────────────────────────\n"
+                    "  ✅  OS Installation Complete\n"
+                    "─────────────────────────────\n\n"
+                    f"  🎯 {data['vps_ip']}\n"
+                    f"  📦 {data['os_name']}\n"
+                    f"  ⏱ {elapsed_final} min\n\n"
+                    "  ┃██████████████████┃ 100%\n\n"
+                    "─────────────────────────────\n\n"
+                    "  🔑 LOGIN:\n"
+                    f"  Host: {data['vps_ip']}:3389\n"
+                    "  User: Administrator\n"
+                    "  Pass: Teddysun.com\n\n"
+                    "─────────────────────────────\n\n"
+                    "  /start untuk kembali ke menu"
+                ),
             )
         else:
-            # Auto-fix Linux password
             await asyncio.sleep(10)
             fix_success = await fix_linux_password(vps_ip, data)
             pass_info = "  Pass: Bolehtuh1" if fix_success else "  Pass: Bolehtuh1 atau LeitboGi0662"
             fix_status = "● Root Login          FIXED" if fix_success else "⚠ Root Login          CHECK"
 
-            await query.edit_message_text(
+            await bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=(
+                    "─────────────────────────────\n"
+                    "  ✅  OS Installation Complete\n"
+                    "─────────────────────────────\n\n"
+                    f"  🎯 {data['vps_ip']}\n"
+                    f"  📦 {data['os_name']}\n"
+                    f"  ⏱ {elapsed_final} min\n\n"
+                    f"  ┃██████████████████┃ 100%\n"
+                    f"  {fix_status}\n\n"
+                    "─────────────────────────────\n\n"
+                    "  🔑 LOGIN:\n"
+                    f"  Host: ssh root@{data['vps_ip']}\n"
+                    f"{pass_info}\n\n"
+                    "─────────────────────────────\n\n"
+                    "  /start untuk kembali ke menu"
+                ),
+            )
+    else:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=(
                 "─────────────────────────────\n"
-                "  ✅  OS Installation Complete\n"
+                "  ⚠️  Installation Timeout\n"
                 "─────────────────────────────\n\n"
                 f"  🎯 {data['vps_ip']}\n"
                 f"  📦 {data['os_name']}\n"
                 f"  ⏱ {elapsed_final} min\n\n"
-                f"  ┃██████████████████┃ 100%\n"
-                f"  {fix_status}\n\n"
+                "  Kemungkinan masih install.\n"
+                "  Cek VNC console.\n\n"
                 "─────────────────────────────\n\n"
-                "  🔑 LOGIN:\n"
-                f"  Host: ssh root@{data['vps_ip']}\n"
-                f"{pass_info}\n\n"
-                "─────────────────────────────",
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]),
-            )
-    else:
-        await query.edit_message_text(
-            "─────────────────────────────\n"
-            "  ⚠️  Installation Timeout\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {data['vps_ip']}\n"
-            f"  📦 {data['os_name']}\n"
-            f"  ⏱ {elapsed_final} min\n\n"
-            "  Kemungkinan masih install.\n"
-            "  Cek VNC console.\n\n"
-            "─────────────────────────────",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]),
+                "  /start untuk kembali ke menu"
+            ),
         )
-
-    return SELECT_VPS_ACTION
 
 
 
