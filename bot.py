@@ -50,12 +50,12 @@ WINDOWS_OPTIONS = {
 }
 
 LINUX_OPTIONS = {
-    "debian12": {"name": "Debian 12", "cmd": '-debian 12'},
-    "debian11": {"name": "Debian 11", "cmd": '-debian 11'},
-    "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": '-ubuntu 22.04'},
-    "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": '-ubuntu 20.04'},
-    "centos9": {"name": "CentOS 9 Stream", "cmd": '-centos 9'},
-    "alma9": {"name": "AlmaLinux 9", "cmd": '-almalinux 9'},
+    "debian12": {"name": "Debian 12", "cmd": 'debian 12'},
+    "debian11": {"name": "Debian 11", "cmd": 'debian 11'},
+    "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": 'ubuntu 22.04'},
+    "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": 'ubuntu 20.04'},
+    "centos9": {"name": "CentOS 9 Stream", "cmd": 'centos 9'},
+    "alma9": {"name": "AlmaLinux 9", "cmd": 'almalinux 9'},
 }
 
 LANG_OPTIONS = {
@@ -510,9 +510,23 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
     try:
         # Build the install command
         if data["os_type"] == "windows":
+            # Windows uses leitbogioro/Tools
+            install_script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
             install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -pwd Bolehtuh1 -firmware"
+            download_cmd = (
+                f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{install_script_url}' "
+                "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
+            )
+            run_cmd = f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
         else:
-            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd Bolehtuh1 -firmware"
+            # Linux uses bin456789/reinstall (better password support)
+            install_script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+            install_cmd = f"reinstall.sh {data['os_cmd']} --password Bolehtuh1"
+            download_cmd = (
+                f"wget --no-check-certificate -qO /tmp/reinstall.sh '{install_script_url}' "
+                "&& chmod a+x /tmp/reinstall.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
+            )
+            run_cmd = f"bash /tmp/reinstall.sh {data['os_cmd']} --password Bolehtuh1 > /tmp/reinstall.log 2>&1; reboot"
 
         # Loading: Step 1 - Connecting
         await query.edit_message_text(
@@ -549,13 +563,9 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
             "[ ] Verifikasi selesai..."
         )
 
-        # Step 1: Download InstallNET.sh and wait for it to finish
-        logger.info(f"Downloading InstallNET.sh to {data['vps_ip']}...")
-        stdin, stdout, stderr = ssh.exec_command(
-            "wget --no-check-certificate -qO /tmp/InstallNET.sh "
-            "'https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh' "
-            "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-        )
+        # Step 1: Download install script and wait for it to finish
+        logger.info(f"Downloading script to {data['vps_ip']}...")
+        stdin, stdout, stderr = ssh.exec_command(download_cmd)
         # Wait for download to complete (max 60s)
         stdout.channel.settimeout(60)
         output = stdout.read().decode('utf-8', errors='ignore').strip()
@@ -578,11 +588,9 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
         )
 
         # Step 2: Run install and reboot after completion
-        logger.info(f"Running install: {install_cmd}")
+        logger.info(f"Running install: {run_cmd}")
         channel = ssh.get_transport().open_session()
-        channel.exec_command(
-            f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
-        )
+        channel.exec_command(run_cmd)
 
         # Wait for script to download images and setup grub
         await asyncio.sleep(20)
