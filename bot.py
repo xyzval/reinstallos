@@ -325,76 +325,85 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
     data = context.user_data
-
-    # Loading: Step 1
-    await query.edit_message_text(
-        f"Menginstall {data['os_name']}...\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "[ ] Menghubungkan ke VPS...\n"
-        "[ ] Download script...\n"
-        "[ ] Menjalankan installer...\n"
-        "[ ] Menunggu reboot...\n"
-        "[ ] Verifikasi selesai..."
-    )
+    import time as _time
+    start_time = _time.time()
 
     success = await run_install(query, context, data)
 
     if not success:
         error_msg = data.get("error_msg", "Unknown error")
         await query.edit_message_text(
-            "GAGAL!\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"Error: {error_msg}\n\n"
-            f"Detail koneksi:\n"
-            f"  IP: {data['vps_ip']}\n"
-            f"  Port: {data['vps_port']}\n"
-            f"  User: {data['vps_user']}\n\n"
-            "Gunakan /start untuk coba lagi."
+            "─────────────────────────────\n"
+            "  ❌  OS Installation Failed\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n"
+            f"  📦 {data['os_name']}\n\n"
+            "─────────────────────────────\n\n"
+            f"  ● SSH Connection      FAILED\n\n"
+            f"  Error: {error_msg}\n\n"
+            "─────────────────────────────\n\n"
+            "/start untuk coba lagi"
         )
         return ConversationHandler.END
 
-    # Loading: Step 4 - waiting for reboot
-    await query.edit_message_text(
-        f"Menginstall {data['os_name']}...\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "[✓] Menghubungkan ke VPS\n"
-        "[✓] Download script\n"
-        "[✓] Menjalankan installer\n"
-        "[⏳] Menunggu VPS reboot & install OS...\n"
-        "[ ] Verifikasi selesai\n\n"
-        "Estimasi: 15-30 menit\n"
-        "Mohon tunggu..."
-    )
-
-    # Monitor: ping VPS every 30s until it comes back online
+    # Monitor: wait for VPS to come back online
     vps_ip = data["vps_ip"]
     vps_port = data.get("vps_port", 22)
     os_type = data["os_type"]
-
-    # Determine which port to check (RDP for Windows, SSH for Linux)
     check_port = 3389 if os_type == "windows" else 22
 
-    # Wait for VPS to go offline first (reboot)
+    # Loading: waiting for reboot
+    await query.edit_message_text(
+        "─────────────────────────────\n"
+        "  ⚙️  OS Installation Service\n"
+        "─────────────────────────────\n\n"
+        f"  🎯 {data['vps_ip']}\n"
+        f"  📦 {data['os_name']}\n"
+        f"  🔤 {data.get('lang', 'N/A') if os_type == 'windows' else 'N/A'}\n\n"
+        "─────────────────────────────\n\n"
+        "  ● SSH Connection      DONE\n"
+        "  ● Download Script     DONE\n"
+        "  ● Run Installer       DONE\n"
+        "  ◐ Installing OS       IN PROGRESS\n"
+        "  ○ Final Check         WAITING\n\n"
+        "  ┃░░░░░░░░░░░░░░░░░░┃ 0%\n\n"
+        "  ⏱ Elapsed: 0 min\n"
+        "  ⏳ Remaining: ~15-30 min\n\n"
+        "─────────────────────────────"
+    )
+
     await asyncio.sleep(30)
 
-    # Then wait for VPS to come back online (max 30 minutes)
+    # Wait for VPS to come back online (max 30 minutes)
     online = False
     for i in range(60):  # 60 * 30s = 30 minutes max
         await asyncio.sleep(30)
 
+        elapsed = int((_time.time() - start_time) / 60)
+        # Calculate progress bar (estimate based on time, max 90%)
+        progress_pct = min(int((elapsed / 20) * 100), 90) if elapsed < 20 else 90
+        filled = int(progress_pct / 5.5)
+        bar = "█" * filled + "░" * (18 - filled)
+
         # Update loading message every 2 minutes
-        minutes_passed = (i + 1) * 0.5
         if i % 4 == 0:
             try:
                 await query.edit_message_text(
-                    f"Menginstall {data['os_name']}...\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "[✓] Menghubungkan ke VPS\n"
-                    "[✓] Download script\n"
-                    "[✓] Menjalankan installer\n"
-                    f"[⏳] Menginstall OS... ({int(minutes_passed)} menit)\n"
-                    "[ ] Verifikasi selesai\n\n"
-                    "Mohon tunggu..."
+                    "─────────────────────────────\n"
+                    "  ⚙️  OS Installation Service\n"
+                    "─────────────────────────────\n\n"
+                    f"  🎯 {data['vps_ip']}\n"
+                    f"  📦 {data['os_name']}\n\n"
+                    "─────────────────────────────\n\n"
+                    "  ● SSH Connection      DONE\n"
+                    "  ● Download Script     DONE\n"
+                    "  ● Run Installer       DONE\n"
+                    "  ◐ Installing OS       IN PROGRESS\n"
+                    "  ○ Final Check         WAITING\n\n"
+                    f"  ┃{bar}┃ {progress_pct}%\n\n"
+                    f"  ⏱ Elapsed: {elapsed} min\n"
+                    f"  ⏳ Remaining: ~{max(15 - elapsed, 2)} min\n\n"
+                    "─────────────────────────────"
                 )
             except Exception:
                 pass
@@ -407,35 +416,41 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             result = sock.connect_ex((vps_ip, check_port))
             sock.close()
             if result == 0:
-                # Port is open! VPS is back online with new OS
                 online = True
                 break
         except Exception:
             pass
 
+    elapsed_final = int((_time.time() - start_time) / 60)
+
     # Final message
     if online:
         if os_type == "windows":
             await query.edit_message_text(
-                "BERHASIL! ✅\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "[✓] Menghubungkan ke VPS\n"
-                "[✓] Download script\n"
-                "[✓] Menjalankan installer\n"
-                "[✓] Install OS selesai\n"
-                "[✓] VPS online!\n\n"
-                f"OS: {data['os_name']}\n"
-                f"Status: BERHASIL DIUBAH!\n\n"
-                "Login sekarang:\n"
-                f"  RDP Host: {data['vps_ip']}:3389\n"
-                "  Username: Administrator\n"
-                "  Password: Bolehtuh1\n\n"
-                "Gunakan /start untuk reinstall lagi."
+                "─────────────────────────────\n"
+                "  ✅  OS Installation Complete\n"
+                "─────────────────────────────\n\n"
+                f"  🎯 {data['vps_ip']}\n"
+                f"  📦 {data['os_name']}\n"
+                f"  ⏱ {elapsed_final} min\n\n"
+                "─────────────────────────────\n\n"
+                "  ● SSH Connection      DONE\n"
+                "  ● Download Script     DONE\n"
+                "  ● Run Installer       DONE\n"
+                "  ● Installing OS       DONE\n"
+                "  ● Final Check         DONE\n\n"
+                "  ┃██████████████████┃ 100%\n\n"
+                "─────────────────────────────\n\n"
+                "  🔑 LOGIN:\n"
+                f"  Host: {data['vps_ip']}:3389\n"
+                "  User: Administrator\n"
+                "  Pass: Bolehtuh1\n\n"
+                "─────────────────────────────\n\n"
+                "/start untuk reinstall lagi"
             )
         else:
             # Fix Linux: enable root login and set password
-            # Try multiple default passwords that leitbogioro might set
-            await asyncio.sleep(10)  # Wait for SSH to be fully ready
+            await asyncio.sleep(10)
             fix_success = False
             default_passwords = ['Bolehtuh1', 'LeitboGi0662', 'Teddysun.com', 'teddysun.com', '']
             default_users = ['root', 'ubuntu', 'debian']
@@ -444,7 +459,6 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 fix_ssh = paramiko.SSHClient()
                 fix_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-                # Try each user/password combination
                 connected = False
                 for user in default_users:
                     if connected:
@@ -463,7 +477,6 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                             continue
 
                 if connected:
-                    # Force set root password and enable SSH root login
                     fix_commands = (
                         "echo 'root:Bolehtuh1' | sudo chpasswd 2>/dev/null; "
                         "echo 'root:Bolehtuh1' | chpasswd 2>/dev/null; "
@@ -491,29 +504,51 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
             if fix_success:
                 await query.edit_message_text(
-                    "BERHASIL! ✅\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "[✓] Menghubungkan ke VPS\n"
-                    "[✓] Download script\n"
-                    "[✓] Menjalankan installer\n"
-                    "[✓] Install OS selesai\n"
-                    "[✓] VPS online!\n"
-                    "[✓] Root login diaktifkan!\n\n"
-                    f"OS: {data['os_name']}\n"
-                    f"Status: BERHASIL DIUBAH!\n\n"
-                    "Login sekarang:\n"
-                    f"  SSH: ssh root@{data['vps_ip']}\n"
-                    "  Password: Bolehtuh1\n\n"
-                    "Gunakan /start untuk reinstall lagi."
+                    "─────────────────────────────\n"
+                    "  ✅  OS Installation Complete\n"
+                    "─────────────────────────────\n\n"
+                    f"  🎯 {data['vps_ip']}\n"
+                    f"  📦 {data['os_name']}\n"
+                    f"  ⏱ {elapsed_final} min\n\n"
+                    "─────────────────────────────\n\n"
+                    "  ● SSH Connection      DONE\n"
+                    "  ● Download Script     DONE\n"
+                    "  ● Run Installer       DONE\n"
+                    "  ● Installing OS       DONE\n"
+                    "  ● Final Check         DONE\n"
+                    "  ● Root Login          FIXED\n\n"
+                    "  ┃██████████████████┃ 100%\n\n"
+                    "─────────────────────────────\n\n"
+                    "  🔑 LOGIN:\n"
+                    f"  Host: ssh root@{data['vps_ip']}\n"
+                    "  Pass: Bolehtuh1\n\n"
+                    "─────────────────────────────\n\n"
+                    "/start untuk reinstall lagi"
                 )
             else:
                 await query.edit_message_text(
-                    "BERHASIL! ✅ (Password perlu dicek)\n"
-                    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                    "[✓] Menghubungkan ke VPS\n"
-                    "[✓] Download script\n"
-                    "[✓] Menjalankan installer\n"
-                    "[✓] Install OS selesai\n"
+                    "─────────────────────────────\n"
+                    "  ✅  OS Installed (Check Pass)\n"
+                    "─────────────────────────────\n\n"
+                    f"  🎯 {data['vps_ip']}\n"
+                    f"  📦 {data['os_name']}\n"
+                    f"  ⏱ {elapsed_final} min\n\n"
+                    "─────────────────────────────\n\n"
+                    "  ● SSH Connection      DONE\n"
+                    "  ● Download Script     DONE\n"
+                    "  ● Run Installer       DONE\n"
+                    "  ● Installing OS       DONE\n"
+                    "  ● Final Check         DONE\n"
+                    "  ⚠ Root Login          CHECK\n\n"
+                    "  ┃██████████████████┃ 100%\n\n"
+                    "─────────────────────────────\n\n"
+                    "  🔑 LOGIN:\n"
+                    f"  Host: ssh root@{data['vps_ip']}\n"
+                    "  Pass: Bolehtuh1\n"
+                    "  Alt : LeitboGi0662\n\n"
+                    "─────────────────────────────\n\n"
+                    "/start untuk reinstall lagi"
+                )
                     "[✓] VPS online!\n"
                     "[⚠️] Auto-fix password gagal\n\n"
                     f"OS: {data['os_name']}\n\n"
@@ -525,18 +560,25 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "Gunakan /start untuk reinstall lagi."
                 )
     else:
+        elapsed_final = int((_time.time() - start_time) / 60)
         await query.edit_message_text(
-            "TIMEOUT ⚠️\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "[✓] Menghubungkan ke VPS\n"
-            "[✓] Download script\n"
-            "[✓] Menjalankan installer\n"
-            "[?] VPS belum online setelah 30 menit\n\n"
-            "Kemungkinan masih install. Coba cek manual:\n"
-            f"  - RDP: {data['vps_ip']}:3389 (Windows)\n"
-            f"  - SSH: ssh root@{data['vps_ip']} (Linux)\n"
-            f"  - Cek VNC console di panel hosting\n\n"
-            "Gunakan /start untuk reinstall lagi."
+            "─────────────────────────────\n"
+            "  ⚠️  Installation Timeout\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n"
+            f"  📦 {data['os_name']}\n"
+            f"  ⏱ {elapsed_final} min (timeout)\n\n"
+            "─────────────────────────────\n\n"
+            "  ● SSH Connection      DONE\n"
+            "  ● Download Script     DONE\n"
+            "  ● Run Installer       DONE\n"
+            "  ⚠ Installing OS       TIMEOUT\n"
+            "  ○ Final Check         SKIPPED\n\n"
+            "─────────────────────────────\n\n"
+            "  Kemungkinan masih install.\n"
+            "  Cek VNC console di panel hosting.\n\n"
+            "─────────────────────────────\n\n"
+            "/start untuk coba lagi"
         )
 
     return ConversationHandler.END
@@ -575,13 +617,19 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
 
         # Loading: Step 1 - Connecting
         await query.edit_message_text(
-            f"Menginstall {data['os_name']}...\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "[⏳] Menghubungkan ke VPS...\n"
-            "[ ] Download script...\n"
-            "[ ] Menjalankan installer...\n"
-            "[ ] Menunggu reboot...\n"
-            "[ ] Verifikasi selesai..."
+            "─────────────────────────────\n"
+            "  ⚙️  OS Installation Service\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n"
+            f"  📦 {data['os_name']}\n\n"
+            "─────────────────────────────\n\n"
+            "  ◐ SSH Connection      CONNECTING\n"
+            "  ○ Download Script     WAITING\n"
+            "  ○ Run Installer       WAITING\n"
+            "  ○ Installing OS       WAITING\n"
+            "  ○ Final Check         WAITING\n\n"
+            "  ┃░░░░░░░░░░░░░░░░░░┃ 0%\n\n"
+            "─────────────────────────────"
         )
 
         # Connect via SSH
@@ -599,13 +647,19 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
 
         # Loading: Step 2 - Downloading
         await query.edit_message_text(
-            f"Menginstall {data['os_name']}...\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "[✓] Menghubungkan ke VPS\n"
-            "[⏳] Download script...\n"
-            "[ ] Menjalankan installer...\n"
-            "[ ] Menunggu reboot...\n"
-            "[ ] Verifikasi selesai..."
+            "─────────────────────────────\n"
+            "  ⚙️  OS Installation Service\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n"
+            f"  📦 {data['os_name']}\n\n"
+            "─────────────────────────────\n\n"
+            "  ● SSH Connection      DONE\n"
+            "  ◐ Download Script     DOWNLOADING\n"
+            "  ○ Run Installer       WAITING\n"
+            "  ○ Installing OS       WAITING\n"
+            "  ○ Final Check         WAITING\n\n"
+            "  ┃███░░░░░░░░░░░░░░░┃ 15%\n\n"
+            "─────────────────────────────"
         )
 
         # Step 1: Download install script and wait for it to finish
@@ -623,13 +677,19 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
 
         # Loading: Step 3 - Running installer
         await query.edit_message_text(
-            f"Menginstall {data['os_name']}...\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "[✓] Menghubungkan ke VPS\n"
-            "[✓] Download script\n"
-            "[⏳] Menjalankan installer...\n"
-            "[ ] Menunggu reboot...\n"
-            "[ ] Verifikasi selesai..."
+            "─────────────────────────────\n"
+            "  ⚙️  OS Installation Service\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n"
+            f"  📦 {data['os_name']}\n\n"
+            "─────────────────────────────\n\n"
+            "  ● SSH Connection      DONE\n"
+            "  ● Download Script     DONE\n"
+            "  ◐ Run Installer       RUNNING\n"
+            "  ○ Installing OS       WAITING\n"
+            "  ○ Final Check         WAITING\n\n"
+            "  ┃██████░░░░░░░░░░░░┃ 30%\n\n"
+            "─────────────────────────────"
         )
 
         # Step 2: Run install and reboot after completion
