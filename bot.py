@@ -325,11 +325,14 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return SELECT_OS
 
     if action == "act_ssh":
+        keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
         await query.edit_message_text(
             get_vps_info_text(data) + "\n\n"
             "  💻 Kirim command SSH:\n\n"
-            "  Contoh: `uptime` atau `df -h`",
+            "  Contoh: `uptime` atau `df -h`\n\n"
+            "  Atau klik Kembali untuk menu.",
             parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return SSH_CMD
 
