@@ -50,12 +50,12 @@ WINDOWS_OPTIONS = {
 }
 
 LINUX_OPTIONS = {
-    "debian12": {"name": "Debian 12", "cmd": '-debian 12'},
-    "debian11": {"name": "Debian 11", "cmd": '-debian 11'},
-    "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": '-ubuntu 22.04'},
-    "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": '-ubuntu 20.04'},
-    "centos9": {"name": "CentOS 9 Stream", "cmd": '-centos 9'},
-    "alma9": {"name": "AlmaLinux 9", "cmd": '-almalinux 9'},
+    "debian12": {"name": "Debian 12", "cmd": '-debian 12', "engine": "leitbogioro"},
+    "debian11": {"name": "Debian 11", "cmd": '-debian 11', "engine": "leitbogioro"},
+    "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": 'ubuntu 22.04', "engine": "bin456789"},
+    "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": 'ubuntu 20.04', "engine": "bin456789"},
+    "centos9": {"name": "CentOS 9 Stream", "cmd": '-centos 9', "engine": "leitbogioro"},
+    "alma9": {"name": "AlmaLinux 9", "cmd": '-almalinux 9', "engine": "leitbogioro"},
 }
 
 LANG_OPTIONS = {
@@ -250,6 +250,7 @@ async def select_os(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         context.user_data["os_name"] = LINUX_OPTIONS[os_key]["name"]
         context.user_data["os_cmd"] = LINUX_OPTIONS[os_key]["cmd"]
         context.user_data["os_type"] = "linux"
+        context.user_data["os_engine"] = LINUX_OPTIONS[os_key]["engine"]
         context.user_data["lang"] = ""
 
         # Skip language, go to confirm
@@ -544,17 +545,33 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
     """Connect to VPS via SSH and run the install command."""
     try:
-        # Build the install command (both use leitbogioro for speed)
-        install_script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
-        download_cmd = (
-            f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{install_script_url}' "
-            "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-        )
+        # Build the install command
         if data["os_type"] == "windows":
+            # Windows always uses leitbogioro
+            install_script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
+            download_cmd = (
+                f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{install_script_url}' "
+                "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
+            )
             install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -pwd Bolehtuh1 -firmware"
+            run_cmd = f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
+        elif data.get("os_engine") == "bin456789":
+            # Ubuntu uses bin456789 (reliable password)
+            install_script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+            download_cmd = (
+                f"wget --no-check-certificate -qO /tmp/reinstall.sh '{install_script_url}' "
+                "&& chmod a+x /tmp/reinstall.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
+            )
+            run_cmd = f"bash /tmp/reinstall.sh {data['os_cmd']} --password Bolehtuh1 > /tmp/reinstall.log 2>&1; reboot"
         else:
+            # Debian, CentOS, AlmaLinux use leitbogioro (fast)
+            install_script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
+            download_cmd = (
+                f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{install_script_url}' "
+                "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
+            )
             install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd Bolehtuh1 -firmware"
-        run_cmd = f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
+            run_cmd = f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
 
         # Loading: Step 1 - Connecting
         await query.edit_message_text(
