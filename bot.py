@@ -50,12 +50,12 @@ WINDOWS_OPTIONS = {
 }
 
 LINUX_OPTIONS = {
-    "debian12": {"name": "Debian 12", "cmd": 'debian 12'},
-    "debian11": {"name": "Debian 11", "cmd": 'debian 11'},
-    "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": 'ubuntu 22.04'},
-    "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": 'ubuntu 20.04'},
-    "centos9": {"name": "CentOS 9 Stream", "cmd": 'centos 9'},
-    "alma9": {"name": "AlmaLinux 9", "cmd": 'almalinux 9'},
+    "debian12": {"name": "Debian 12", "cmd": '-debian 12'},
+    "debian11": {"name": "Debian 11", "cmd": '-debian 11'},
+    "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": '-ubuntu 22.04'},
+    "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": '-ubuntu 20.04'},
+    "centos9": {"name": "CentOS 9 Stream", "cmd": '-centos 9'},
+    "alma9": {"name": "AlmaLinux 9", "cmd": '-almalinux 9'},
 }
 
 LANG_OPTIONS = {
@@ -433,60 +433,96 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
         else:
             # Fix Linux: enable root login and set password
+            # Try multiple default passwords that leitbogioro might set
             await asyncio.sleep(10)  # Wait for SSH to be fully ready
+            fix_success = False
+            default_passwords = ['Bolehtuh1', 'LeitboGi0662', 'Teddysun.com', 'teddysun.com', '']
+            default_users = ['root', 'ubuntu', 'debian']
+
             try:
                 fix_ssh = paramiko.SSHClient()
                 fix_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                # Try login as root first
-                try:
-                    fix_ssh.connect(
-                        hostname=vps_ip, port=22,
-                        username='root', password='Bolehtuh1',
-                        timeout=15, allow_agent=False, look_for_keys=False,
-                    )
-                except Exception:
-                    # Try as ubuntu user (cloud image default)
-                    fix_ssh.connect(
-                        hostname=vps_ip, port=22,
-                        username='ubuntu', password='Bolehtuh1',
-                        timeout=15, allow_agent=False, look_for_keys=False,
-                    )
 
-                # Enable root login and set password
-                fix_commands = (
-                    "echo 'root:Bolehtuh1' | sudo chpasswd; "
-                    "sudo sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; "
-                    "sudo sed -i 's/PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; "
-                    "sudo sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
-                    "sudo sed -i 's/PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
-                    "sudo systemctl restart sshd 2>/dev/null; "
-                    "sudo service ssh restart 2>/dev/null; "
-                    "echo 'FIX_DONE'"
-                )
-                stdin, stdout, stderr = fix_ssh.exec_command(fix_commands)
-                stdout.channel.settimeout(15)
-                fix_output = stdout.read().decode('utf-8', errors='ignore').strip()
-                logger.info(f"Linux fix output: {fix_output}")
-                fix_ssh.close()
+                # Try each user/password combination
+                connected = False
+                for user in default_users:
+                    if connected:
+                        break
+                    for pwd in default_passwords:
+                        try:
+                            fix_ssh.connect(
+                                hostname=vps_ip, port=22,
+                                username=user, password=pwd,
+                                timeout=10, allow_agent=False, look_for_keys=False,
+                            )
+                            connected = True
+                            logger.info(f"Linux fix: connected as {user} with password '{pwd}'")
+                            break
+                        except Exception:
+                            continue
+
+                if connected:
+                    # Force set root password and enable SSH root login
+                    fix_commands = (
+                        "echo 'root:Bolehtuh1' | sudo chpasswd 2>/dev/null; "
+                        "echo 'root:Bolehtuh1' | chpasswd 2>/dev/null; "
+                        "sudo sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                        "sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                        "sudo sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                        "sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
+                        "sudo systemctl restart sshd 2>/dev/null; "
+                        "sudo service ssh restart 2>/dev/null; "
+                        "systemctl restart sshd 2>/dev/null; "
+                        "service ssh restart 2>/dev/null; "
+                        "echo 'FIX_DONE'"
+                    )
+                    stdin, stdout, stderr = fix_ssh.exec_command(fix_commands)
+                    stdout.channel.settimeout(15)
+                    fix_output = stdout.read().decode('utf-8', errors='ignore').strip()
+                    logger.info(f"Linux fix output: {fix_output}")
+                    if "FIX_DONE" in fix_output:
+                        fix_success = True
+                    fix_ssh.close()
+                else:
+                    logger.info("Linux fix: could not connect with any default password")
             except Exception as e:
-                logger.info(f"Linux fix failed (might already be OK): {e}")
+                logger.info(f"Linux fix error: {e}")
 
-            await query.edit_message_text(
-                "BERHASIL! ✅\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "[✓] Menghubungkan ke VPS\n"
-                "[✓] Download script\n"
-                "[✓] Menjalankan installer\n"
-                "[✓] Install OS selesai\n"
-                "[✓] VPS online!\n"
-                "[✓] Root login diaktifkan!\n\n"
-                f"OS: {data['os_name']}\n"
-                f"Status: BERHASIL DIUBAH!\n\n"
-                "Login sekarang:\n"
-                f"  SSH: ssh root@{data['vps_ip']}\n"
-                "  Password: Bolehtuh1\n\n"
-                "Gunakan /start untuk reinstall lagi."
-            )
+            if fix_success:
+                await query.edit_message_text(
+                    "BERHASIL! ✅\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "[✓] Menghubungkan ke VPS\n"
+                    "[✓] Download script\n"
+                    "[✓] Menjalankan installer\n"
+                    "[✓] Install OS selesai\n"
+                    "[✓] VPS online!\n"
+                    "[✓] Root login diaktifkan!\n\n"
+                    f"OS: {data['os_name']}\n"
+                    f"Status: BERHASIL DIUBAH!\n\n"
+                    "Login sekarang:\n"
+                    f"  SSH: ssh root@{data['vps_ip']}\n"
+                    "  Password: Bolehtuh1\n\n"
+                    "Gunakan /start untuk reinstall lagi."
+                )
+            else:
+                await query.edit_message_text(
+                    "BERHASIL! ✅ (Password perlu dicek)\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    "[✓] Menghubungkan ke VPS\n"
+                    "[✓] Download script\n"
+                    "[✓] Menjalankan installer\n"
+                    "[✓] Install OS selesai\n"
+                    "[✓] VPS online!\n"
+                    "[⚠️] Auto-fix password gagal\n\n"
+                    f"OS: {data['os_name']}\n\n"
+                    "Coba login dengan:\n"
+                    f"  SSH: ssh root@{data['vps_ip']}\n"
+                    "  Password: Bolehtuh1\n"
+                    "  atau: LeitboGi0662\n"
+                    "  atau: Teddysun.com\n\n"
+                    "Gunakan /start untuk reinstall lagi."
+                )
     else:
         await query.edit_message_text(
             "TIMEOUT ⚠️\n"
@@ -508,25 +544,17 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
     """Connect to VPS via SSH and run the install command."""
     try:
-        # Build the install command
+        # Build the install command (both use leitbogioro for speed)
+        install_script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
+        download_cmd = (
+            f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{install_script_url}' "
+            "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
+        )
         if data["os_type"] == "windows":
-            # Windows uses leitbogioro/Tools
-            install_script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
             install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -pwd Bolehtuh1 -firmware"
-            download_cmd = (
-                f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{install_script_url}' "
-                "&& chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-            )
-            run_cmd = f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
         else:
-            # Linux uses bin456789/reinstall (better password support)
-            install_script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
-            install_cmd = f"reinstall.sh {data['os_cmd']} --password Bolehtuh1"
-            download_cmd = (
-                f"wget --no-check-certificate -qO /tmp/reinstall.sh '{install_script_url}' "
-                "&& chmod a+x /tmp/reinstall.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-            )
-            run_cmd = f"bash /tmp/reinstall.sh {data['os_cmd']} --password Bolehtuh1 > /tmp/reinstall.log 2>&1; reboot"
+            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd Bolehtuh1 -firmware"
+        run_cmd = f"bash {install_cmd} > /tmp/reinstall.log 2>&1; reboot"
 
         # Loading: Step 1 - Connecting
         await query.edit_message_text(
