@@ -549,16 +549,6 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "─────────────────────────────\n\n"
                     "/start untuk reinstall lagi"
                 )
-                    "[✓] VPS online!\n"
-                    "[⚠️] Auto-fix password gagal\n\n"
-                    f"OS: {data['os_name']}\n\n"
-                    "Coba login dengan:\n"
-                    f"  SSH: ssh root@{data['vps_ip']}\n"
-                    "  Password: Bolehtuh1\n"
-                    "  atau: LeitboGi0662\n"
-                    "  atau: Teddysun.com\n\n"
-                    "Gunakan /start untuk reinstall lagi."
-                )
     else:
         elapsed_final = int((_time.time() - start_time) / 60)
         await query.edit_message_text(
