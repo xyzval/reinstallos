@@ -154,7 +154,10 @@ def get_action_keyboard():
             InlineKeyboardButton("🔄 Reboot", callback_data="act_reboot"),
             InlineKeyboardButton("⏹ Shutdown", callback_data="act_shutdown"),
         ],
-        [InlineKeyboardButton("💻 SSH Command", callback_data="act_ssh")],
+        [
+            InlineKeyboardButton("💻 SSH Command", callback_data="act_ssh"),
+            InlineKeyboardButton("📡 Status", callback_data="act_status"),
+        ],
         [
             InlineKeyboardButton("🗑 Hapus VPS", callback_data="act_delete"),
             InlineKeyboardButton("◀️ Kembali", callback_data="act_back"),
@@ -367,6 +370,29 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             "  Status: Shutdown sent!\n\n"
             "─────────────────────────────",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]),
+        )
+        return SELECT_VPS_ACTION
+
+    if action == "act_status":
+        vps_ip = data["vps_ip"]
+        await query.edit_message_text(f"  📡 Checking {vps_ip}...")
+        proc = await asyncio.create_subprocess_exec(
+            "ping", "-c", "3", "-W", "5", vps_ip,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        if proc.returncode == 0:
+            status_text = f"  ✅ {vps_ip} ONLINE"
+        else:
+            status_text = f"  ❌ {vps_ip} OFFLINE"
+        keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  📡  VPS Status\n"
+            "─────────────────────────────\n\n"
+            f"{status_text}\n\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return SELECT_VPS_ACTION
 
