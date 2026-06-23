@@ -432,6 +432,45 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "Gunakan /start untuk reinstall lagi."
             )
         else:
+            # Fix Linux: enable root login and set password
+            await asyncio.sleep(10)  # Wait for SSH to be fully ready
+            try:
+                fix_ssh = paramiko.SSHClient()
+                fix_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                # Try login as root first
+                try:
+                    fix_ssh.connect(
+                        hostname=vps_ip, port=22,
+                        username='root', password='Bolehtuh1',
+                        timeout=15, allow_agent=False, look_for_keys=False,
+                    )
+                except Exception:
+                    # Try as ubuntu user (cloud image default)
+                    fix_ssh.connect(
+                        hostname=vps_ip, port=22,
+                        username='ubuntu', password='Bolehtuh1',
+                        timeout=15, allow_agent=False, look_for_keys=False,
+                    )
+
+                # Enable root login and set password
+                fix_commands = (
+                    "echo 'root:Bolehtuh1' | sudo chpasswd; "
+                    "sudo sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; "
+                    "sudo sed -i 's/PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; "
+                    "sudo sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
+                    "sudo sed -i 's/PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; "
+                    "sudo systemctl restart sshd 2>/dev/null; "
+                    "sudo service ssh restart 2>/dev/null; "
+                    "echo 'FIX_DONE'"
+                )
+                stdin, stdout, stderr = fix_ssh.exec_command(fix_commands)
+                stdout.channel.settimeout(15)
+                fix_output = stdout.read().decode('utf-8', errors='ignore').strip()
+                logger.info(f"Linux fix output: {fix_output}")
+                fix_ssh.close()
+            except Exception as e:
+                logger.info(f"Linux fix failed (might already be OK): {e}")
+
             await query.edit_message_text(
                 "BERHASIL! ✅\n"
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -439,7 +478,8 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "[✓] Download script\n"
                 "[✓] Menjalankan installer\n"
                 "[✓] Install OS selesai\n"
-                "[✓] VPS online!\n\n"
+                "[✓] VPS online!\n"
+                "[✓] Root login diaktifkan!\n\n"
                 f"OS: {data['os_name']}\n"
                 f"Status: BERHASIL DIUBAH!\n\n"
                 "Login sekarang:\n"
