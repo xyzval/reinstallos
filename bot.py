@@ -472,7 +472,7 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
         if data["os_type"] == "windows":
             install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -firmware"
         else:
-            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd 'password123' -firmware"
+            install_cmd = f"/tmp/InstallNET.sh {data['os_cmd']} -pwd Teddysun.com -firmware"
 
         # Loading: Step 1 - Connecting
         await query.edit_message_text(
