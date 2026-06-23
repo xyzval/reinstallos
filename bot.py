@@ -290,7 +290,7 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
             "\nLogin setelah selesai:\n"
             f"  RDP Host: {data['vps_ip']}:3389\n"
             "  Username: Administrator\n"
-            "  Password: Bolehtuh1\n"
+            "  Password: Teddysun.com\n"
         )
     else:
         summary += (
@@ -444,7 +444,7 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "  🔑 LOGIN:\n"
                 f"  Host: {data['vps_ip']}:3389\n"
                 "  User: Administrator\n"
-                "  Pass: Bolehtuh1\n\n"
+                "  Pass: Teddysun.com\n\n"
                 "─────────────────────────────\n\n"
                 "/start untuk reinstall lagi"
             )
@@ -795,7 +795,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "  Windows: 10, 11, Server 2012-2022\n"
         "  Linux: Debian, Ubuntu, CentOS, dll\n\n"
         "Login default:\n"
-        "  Windows: Administrator / Bolehtuh1\n"
+        "  Windows: Administrator / Teddysun.com\n"
         "  Linux: root / Bolehtuh1"
     )
 
