@@ -551,7 +551,7 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     if os_type == "windows":
         summary += "\n  🔑 Login: Administrator / Teddysun.com\n"
     else:
-        summary += "\n  🔑 Login: root / Bolehtuh1\n"
+        summary += "\n  🔑 Login: root / digicore\n"
     summary += "\n  ⚠️ SEMUA DATA AKAN DIHAPUS!\n"
 
     keyboard = [
@@ -688,7 +688,7 @@ async def monitor_install_background(bot, chat_id: int, message_id: int, data: d
         else:
             await asyncio.sleep(10)
             fix_success = await fix_linux_password(vps_ip, data)
-            pass_info = "  Pass: Bolehtuh1" if fix_success else "  Pass: Bolehtuh1 atau LeitboGi0662"
+            pass_info = "  Pass: digicore" if fix_success else "  Pass: digicore atau LeitboGi0662"
             fix_status = "● Root Login          FIXED" if fix_success else "⚠ Root Login          CHECK"
 
             await bot.edit_message_text(
@@ -733,7 +733,7 @@ async def monitor_install_background(bot, chat_id: int, message_id: int, data: d
 
 async def fix_linux_password(vps_ip: str, data: dict) -> bool:
     """Try to fix Linux root password after install."""
-    default_passwords = ['Bolehtuh1', 'LeitboGi0662', 'Teddysun.com', 'teddysun.com', '']
+    default_passwords = ['digicore', 'Bolehtuh1', 'LeitboGi0662', 'Teddysun.com', 'teddysun.com', '']
     default_users = ['root', 'ubuntu', 'debian']
     try:
         fix_ssh = paramiko.SSHClient()
@@ -752,8 +752,8 @@ async def fix_linux_password(vps_ip: str, data: dict) -> bool:
                     continue
         if connected:
             fix_commands = (
-                "echo 'root:Bolehtuh1' | sudo chpasswd 2>/dev/null; "
-                "echo 'root:Bolehtuh1' | chpasswd 2>/dev/null; "
+                "echo 'root:digicore' | sudo chpasswd 2>/dev/null; "
+                "echo 'root:digicore' | chpasswd 2>/dev/null; "
                 "sudo sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
                 "sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
                 "sudo sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
@@ -777,15 +777,15 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
         if data["os_type"] == "windows":
             url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
             dl_cmd = f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{url}' && chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-            run_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -pwd Bolehtuh1 -firmware > /tmp/reinstall.log 2>&1; reboot"
+            run_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -lang '{data['lang']}' -pwd digicore -firmware > /tmp/reinstall.log 2>&1; reboot"
         elif data.get("os_engine") == "bin456789":
             url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
             dl_cmd = f"wget --no-check-certificate -qO /tmp/reinstall.sh '{url}' && chmod a+x /tmp/reinstall.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-            run_cmd = f"bash /tmp/reinstall.sh {data['os_cmd']} --password Bolehtuh1 > /tmp/reinstall.log 2>&1; reboot"
+            run_cmd = f"bash /tmp/reinstall.sh {data['os_cmd']} --password digicore > /tmp/reinstall.log 2>&1; reboot"
         else:
             url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
             dl_cmd = f"wget --no-check-certificate -qO /tmp/InstallNET.sh '{url}' && chmod a+x /tmp/InstallNET.sh && echo 'DOWNLOAD_OK' || echo 'DOWNLOAD_FAIL'"
-            run_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -pwd Bolehtuh1 -firmware > /tmp/reinstall.log 2>&1; reboot"
+            run_cmd = f"bash /tmp/InstallNET.sh {data['os_cmd']} -pwd digicore -firmware > /tmp/reinstall.log 2>&1; reboot"
 
         # Step 1: Connect
         await query.edit_message_text(
@@ -1087,7 +1087,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  Kirim langsung: ip:port@user:password\n\n"
         "Password:\n"
         "  Windows: Teddysun.com\n"
-        "  Linux: Bolehtuh1\n\n"
+        "  Linux: digicore\n\n"
         "─────────────────────────────"
     )
 
