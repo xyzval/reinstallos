@@ -204,7 +204,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "  Kirim detail VPS dengan format:\n\n"
             "  `ip:port@user:password`\n\n"
             "  Contoh:\n"
-            "  `104.207.77.243:22@root:Bolehtuh1`",
+            "  `104.207.xx.xx:22022@root:Digicore@1`",
             parse_mode="Markdown",
         )
         return ADD_VPS
@@ -219,7 +219,7 @@ async def add_vps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(
             "Format salah! Kirim ulang:\n\n"
             "`ip:port@user:password`\n\n"
-            "Contoh: `104.207.77.243:22@root:Bolehtuh1`",
+            "Contoh: `104.207.xx.xx:22022@root:Digicore@1`",
             parse_mode="Markdown",
         )
         return ADD_VPS
@@ -266,7 +266,7 @@ async def select_vps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "  Kirim detail VPS:\n\n"
             "  `ip:port@user:password`\n\n"
             "  Contoh:\n"
-            "  `104.207.77.243:22@root:Bolehtuh1`",
+            "  `104.207.xx.xx:22022@root:Digicore@1`",
             parse_mode="Markdown",
         )
         return ADD_VPS
