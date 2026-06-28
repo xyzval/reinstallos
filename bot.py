@@ -974,6 +974,74 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.message.reply_text(f"❌ {vps_ip} OFFLINE")
 
 
+async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Update bot dari GitHub (git pull) dan restart service."""
+    if not is_authorized(update.effective_user.id):
+        return
+
+    await update.message.reply_text("⏳ Mengupdate bot dari GitHub...")
+
+    try:
+        # Git pull
+        proc = await asyncio.create_subprocess_exec(
+            "git", "pull", "--force",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/opt/reinstallos",
+        )
+        stdout, stderr = await proc.communicate()
+        git_output = stdout.decode('utf-8', errors='ignore').strip()
+        git_error = stderr.decode('utf-8', errors='ignore').strip()
+
+        if proc.returncode != 0:
+            await update.message.reply_text(
+                "─────────────────────────────\n"
+                "  ❌  Update Gagal\n"
+                "─────────────────────────────\n\n"
+                f"  Error:\n  {git_error or git_output}\n\n"
+                "─────────────────────────────"
+            )
+            return
+
+        # Tampilkan hasil git pull
+        if "Already up to date" in git_output:
+            await update.message.reply_text(
+                "─────────────────────────────\n"
+                "  ✅  Bot Sudah Terbaru\n"
+                "─────────────────────────────\n\n"
+                "  Tidak ada perubahan baru.\n\n"
+                "─────────────────────────────"
+            )
+            return
+
+        # Ada update, restart service
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  🔄  Update Ditemukan\n"
+            "─────────────────────────────\n\n"
+            f"  {git_output}\n\n"
+            "  ⏳ Merestart bot...\n"
+            "─────────────────────────────"
+        )
+
+        # Restart service (bot akan mati dan hidup lagi otomatis)
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "restart", "reinstall-bot",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
+    except Exception as e:
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ❌  Update Error\n"
+            "─────────────────────────────\n\n"
+            f"  {str(e)}\n\n"
+            "─────────────────────────────"
+        )
+
+
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Help command."""
     await update.message.reply_text(
@@ -987,7 +1055,10 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /reboot   - Reboot VPS\n"
         "  /shutdown - Shutdown VPS\n"
         "  /status   - Cek online\n"
+        "  /update   - Update bot dari GitHub\n"
         "  /help     - Bantuan\n\n"
+        "Tambah VPS:\n"
+        "  Kirim langsung: ip:port@user:password\n\n"
         "Password:\n"
         "  Windows: Teddysun.com\n"
         "  Linux: Bolehtuh1\n\n"
@@ -1012,6 +1083,7 @@ async def post_init(application):
         BotCommand("reboot", "Reboot VPS"),
         BotCommand("shutdown", "Shutdown VPS"),
         BotCommand("status", "Cek online/offline"),
+        BotCommand("update", "Update bot dari GitHub"),
         BotCommand("help", "Bantuan"),
     ]
     await application.bot.set_my_commands(commands)
@@ -1058,6 +1130,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reboot", cmd_reboot))
     app.add_handler(CommandHandler("shutdown", cmd_shutdown))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("help", cmd_help))
 
     # Auto-detect VPS format tanpa /start (priority rendah, jadi tidak ganggu conversation)
