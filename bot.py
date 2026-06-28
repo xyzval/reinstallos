@@ -861,6 +861,43 @@ async def run_install(query, context: ContextTypes.DEFAULT_TYPE, data: dict):
 
 
 
+# ============ Auto-detect VPS handler (tanpa /start) ============
+
+async def auto_add_vps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Auto-detect VPS format dari pesan biasa tanpa harus /start."""
+    user_id = update.effective_user.id
+    if not is_authorized(user_id):
+        return
+
+    text = update.message.text.strip()
+    data = parse_vps_detail(text)
+
+    if data is None:
+        return  # Bukan format VPS, abaikan
+
+    # Delete message (contains password)
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    # Save to VPS list
+    vps_list = load_vps_list(user_id)
+    exists = any(v['vps_ip'] == data['vps_ip'] and v['vps_port'] == data['vps_port'] for v in vps_list)
+    if not exists:
+        vps_list.append(data)
+        save_vps_list(user_id, vps_list)
+
+    # Set as active VPS
+    context.user_data.update(data)
+
+    # Show action menu langsung
+    await update.message.reply_text(
+        get_vps_info_text(data) + "\n\n  ✅ VPS tersimpan!\n\n  Pilih aksi:",
+        reply_markup=get_action_keyboard(),
+    )
+
+
 # ============ Standalone Commands ============
 
 async def cmd_ssh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1022,6 +1059,9 @@ def main() -> None:
     app.add_handler(CommandHandler("shutdown", cmd_shutdown))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("help", cmd_help))
+
+    # Auto-detect VPS format tanpa /start (priority rendah, jadi tidak ganggu conversation)
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, auto_add_vps))
 
     print("Bot is running...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
