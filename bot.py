@@ -982,9 +982,38 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text("⏳ Mengupdate bot dari GitHub...")
 
     try:
-        # Git pull
+        # Fetch latest dari remote
         proc = await asyncio.create_subprocess_exec(
-            "git", "pull", "--force",
+            "git", "fetch", "origin", "main",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/opt/reinstallos",
+        )
+        await proc.communicate()
+
+        # Cek apakah ada perbedaan
+        proc = await asyncio.create_subprocess_exec(
+            "git", "diff", "HEAD", "origin/main", "--stat",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/opt/reinstallos",
+        )
+        stdout, stderr = await proc.communicate()
+        diff_output = stdout.decode('utf-8', errors='ignore').strip()
+
+        if not diff_output:
+            await update.message.reply_text(
+                "─────────────────────────────\n"
+                "  ✅  Bot Sudah Terbaru\n"
+                "─────────────────────────────\n\n"
+                "  Tidak ada perubahan baru.\n\n"
+                "─────────────────────────────"
+            )
+            return
+
+        # Reset ke versi terbaru dari GitHub
+        proc = await asyncio.create_subprocess_exec(
+            "git", "reset", "--hard", "origin/main",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd="/opt/reinstallos",
@@ -1003,23 +1032,12 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
-        # Tampilkan hasil git pull
-        if "Already up to date" in git_output:
-            await update.message.reply_text(
-                "─────────────────────────────\n"
-                "  ✅  Bot Sudah Terbaru\n"
-                "─────────────────────────────\n\n"
-                "  Tidak ada perubahan baru.\n\n"
-                "─────────────────────────────"
-            )
-            return
-
         # Ada update, restart service
         await update.message.reply_text(
             "─────────────────────────────\n"
-            "  🔄  Update Ditemukan\n"
+            "  🔄  Update Berhasil!\n"
             "─────────────────────────────\n\n"
-            f"  {git_output}\n\n"
+            f"  {diff_output}\n\n"
             "  ⏳ Merestart bot...\n"
             "─────────────────────────────"
         )
