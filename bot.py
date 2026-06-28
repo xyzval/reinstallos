@@ -1032,7 +1032,7 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
-        # Ada update, restart service
+        # Ada update, kirim info lalu restart
         await update.message.reply_text(
             "─────────────────────────────\n"
             "  🔄  Update Berhasil!\n"
@@ -1041,6 +1041,14 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "  ⏳ Merestart bot...\n"
             "─────────────────────────────"
         )
+
+        # Simpan chat_id untuk kirim notif setelah restart
+        restart_file = "/opt/reinstallos/.restart_notify"
+        try:
+            with open(restart_file, 'w') as f:
+                json.dump({"chat_id": update.effective_chat.id}, f)
+        except Exception:
+            pass
 
         # Restart service (bot akan mati dan hidup lagi otomatis)
         proc = await asyncio.create_subprocess_exec(
@@ -1093,7 +1101,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ============ Main ============
 
 async def post_init(application):
-    """Set bot commands menu."""
+    """Set bot commands menu dan kirim notif restart jika ada."""
     commands = [
         BotCommand("start", "Menu VPS"),
         BotCommand("info", "Info VPS"),
@@ -1105,6 +1113,29 @@ async def post_init(application):
         BotCommand("help", "Bantuan"),
     ]
     await application.bot.set_my_commands(commands)
+
+    # Kirim notifikasi restart berhasil jika ada
+    restart_file = "/opt/reinstallos/.restart_notify"
+    try:
+        if os.path.exists(restart_file):
+            with open(restart_file, 'r') as f:
+                data = json.load(f)
+            os.remove(restart_file)
+            chat_id = data.get("chat_id")
+            if chat_id:
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=(
+                        "─────────────────────────────\n"
+                        "  ✅  Restart Berhasil!\n"
+                        "─────────────────────────────\n\n"
+                        "  Bot sudah aktif kembali.\n"
+                        "  Versi terbaru dari GitHub.\n\n"
+                        "─────────────────────────────"
+                    ),
+                )
+    except Exception as e:
+        logger.info(f"Restart notify error: {e}")
 
 
 def main() -> None:
