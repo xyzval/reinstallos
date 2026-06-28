@@ -171,6 +171,7 @@ def get_vps_info_text(data: dict) -> str:
         "─────────────────────────────\n"
         f"  🖥️  VPS: {data['vps_ip']}:{data['vps_port']}\n"
         f"  👤  User: {data['vps_user']}\n"
+        f"  🔑  Pass: {data['vps_pass']}\n"
         "─────────────────────────────"
     )
 
