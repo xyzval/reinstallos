@@ -159,9 +159,10 @@ def get_action_keyboard():
             InlineKeyboardButton("📡 Status", callback_data="act_status"),
         ],
         [
+            InlineKeyboardButton("🔓 Open All Port", callback_data="act_openport"),
             InlineKeyboardButton("🗑 Hapus VPS", callback_data="act_delete"),
-            InlineKeyboardButton("◀️ Kembali", callback_data="act_back"),
         ],
+        [InlineKeyboardButton("◀️ Kembali", callback_data="act_back")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -394,6 +395,65 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             "─────────────────────────────",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return SELECT_VPS_ACTION
+
+    if action == "act_openport":
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            f"  🔓  Open All Port - {data['vps_ip']}\n"
+            "─────────────────────────────\n\n"
+            "  ⏳ Membuka semua port...\n"
+            "─────────────────────────────"
+        )
+        openport_cmd = (
+            # Disable UFW
+            "ufw disable 2>/dev/null; "
+            # Disable firewalld
+            "systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null; "
+            # Flush iptables
+            "iptables -F 2>/dev/null; iptables -X 2>/dev/null; "
+            "iptables -P INPUT ACCEPT 2>/dev/null; "
+            "iptables -P FORWARD ACCEPT 2>/dev/null; "
+            "iptables -P OUTPUT ACCEPT 2>/dev/null; "
+            # Flush ip6tables
+            "ip6tables -F 2>/dev/null; ip6tables -X 2>/dev/null; "
+            "ip6tables -P INPUT ACCEPT 2>/dev/null; "
+            "ip6tables -P FORWARD ACCEPT 2>/dev/null; "
+            "ip6tables -P OUTPUT ACCEPT 2>/dev/null; "
+            # Flush nftables
+            "nft flush ruleset 2>/dev/null; "
+            # Save iptables agar persist setelah reboot
+            "netfilter-persistent save 2>/dev/null; "
+            "iptables-save > /etc/iptables.rules 2>/dev/null; "
+            "echo 'OPENPORT_DONE'"
+        )
+        result = await ssh_exec(data, openport_cmd)
+        if "OPENPORT_DONE" in result:
+            keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
+            await query.edit_message_text(
+                "─────────────────────────────\n"
+                "  ✅  All Port Opened!\n"
+                "─────────────────────────────\n\n"
+                f"  🎯 {data['vps_ip']}\n\n"
+                "  ● UFW disabled\n"
+                "  ● Firewalld disabled\n"
+                "  ● iptables flushed (ACCEPT ALL)\n"
+                "  ● ip6tables flushed (ACCEPT ALL)\n"
+                "  ● nftables flushed\n\n"
+                "  Port 1-65535 TCP/UDP terbuka.\n\n"
+                "─────────────────────────────",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
+        else:
+            keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
+            await query.edit_message_text(
+                "─────────────────────────────\n"
+                "  ❌  Open Port Gagal\n"
+                "─────────────────────────────\n\n"
+                f"  {result}\n\n"
+                "─────────────────────────────",
+                reply_markup=InlineKeyboardMarkup(keyboard),
+            )
         return SELECT_VPS_ACTION
 
     if action == "act_back_menu":
