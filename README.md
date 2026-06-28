@@ -2,6 +2,31 @@
 
 Script dan Telegram Bot untuk reinstall VPS ke **Windows** atau **Linux** secara otomatis.
 
+## ⚡ Install 1-Klik (Recommended)
+
+Cukup jalankan **1 command** ini di VPS/server yang akan menjalankan bot:
+
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/install.sh)
+```
+
+**Itu saja!** Bot langsung aktif 24/7, auto-restart jika crash. 🚀
+
+> **Catatan:** Jalankan sebagai root. Jika belum root, gunakan:
+> ```bash
+> sudo bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/install.sh)
+> ```
+
+### Apa yang dilakukan installer:
+- ✅ Install semua dependencies otomatis
+- ✅ Download bot dari GitHub
+- ✅ Minta Bot Token (dari @BotFather)
+- ✅ Setup service systemd (bot jalan 24/7)
+- ✅ Auto-restart jika bot crash
+- ✅ Langsung aktif setelah install
+
+---
+
 ## Fitur
 
 - Telegram Bot: kirim detail VPS, pilih OS, otomatis install
@@ -10,12 +35,22 @@ Script dan Telegram Bot untuk reinstall VPS ke **Windows** atau **Linux** secara
 - Linux: Debian, Ubuntu, CentOS, AlmaLinux, Rocky, Fedora, Alpine
 - ISO dicari otomatis (tidak perlu cari link sendiri)
 - Menu interaktif bahasa Indonesia
+- Multi-VPS management (simpan banyak VPS)
+- Auto-fix Linux password setelah install
+
+---
 
 ## Cara Pakai
 
-### Metode 1: Via Telegram Bot (Otomatis)
+### Metode 1: Install 1-Klik (Otomatis 24/7)
 
-#### Setup Bot
+```bash
+bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/install.sh)
+```
+
+Ikuti instruksi di layar → Bot langsung jalan!
+
+### Metode 2: Setup Manual
 
 1. Buat bot di Telegram via [@BotFather](https://t.me/BotFather), dapatkan token
 2. Clone repo ini:
@@ -39,33 +74,32 @@ Script dan Telegram Bot untuk reinstall VPS ke **Windows** atau **Linux** secara
    python3 bot.py
    ```
 
-#### Cara Pakai Bot
+### Cara Pakai Bot
 
 1. Buka bot di Telegram
 2. Ketik `/start`
-3. Masukkan detail VPS:
-   - IP Address
-   - SSH Port (default: 22)
-   - Username (default: root)
-   - Password
+3. Masukkan detail VPS: `ip:port@user:password`
 4. Pilih kategori: **Windows** atau **Linux**
 5. Pilih OS yang diinginkan
 6. Pilih bahasa (untuk Windows)
 7. Konfirmasi → Bot akan otomatis install!
 8. Tunggu 15-30 menit, lalu login via RDP/SSH
 
-#### Perintah Bot
+### Perintah Bot
 
 | Perintah | Fungsi |
 |---|---|
-| `/start` | Mulai reinstall OS |
-| `/status` | Cek apakah VPS sudah online |
-| `/cancel` | Batalkan proses |
+| `/start` | Menu VPS (tambah/pilih VPS) |
+| `/info` | Info sistem VPS |
+| `/ssh CMD` | Jalankan command SSH |
+| `/reboot` | Reboot VPS |
+| `/shutdown` | Shutdown VPS |
+| `/status` | Cek online/offline |
 | `/help` | Tampilkan bantuan |
 
 ---
 
-### Metode 2: Jalankan Langsung di VPS (Manual)
+### Metode 3: Jalankan Langsung di VPS (Manual)
 
 ```bash
 wget -O reinstall.sh https://raw.githubusercontent.com/xyzval/reinstallos/main/reinstall.sh && chmod +x reinstall.sh && bash reinstall.sh
@@ -124,7 +158,9 @@ Pilih nomor OS dari menu, selesai!
 
 ---
 
-## Deploy Bot di VPS/Server
+## Deploy Bot di VPS/Server (Manual)
+
+> **Catatan:** Jika sudah menggunakan install 1-klik di atas, bagian ini tidak perlu.
 
 ### Jalankan sebagai service (systemd):
 
@@ -159,6 +195,29 @@ sudo systemctl start reinstall-bot
 Cek status:
 ```bash
 sudo systemctl status reinstall-bot
+```
+
+---
+
+## Manajemen Bot
+
+Setelah install, gunakan perintah ini untuk mengelola bot:
+
+```bash
+# Cek status bot
+systemctl status reinstall-bot
+
+# Restart bot
+systemctl restart reinstall-bot
+
+# Stop bot
+systemctl stop reinstall-bot
+
+# Lihat log real-time
+journalctl -u reinstall-bot -f
+
+# Update bot ke versi terbaru
+cd /opt/reinstallos && git pull && systemctl restart reinstall-bot
 ```
 
 ---
