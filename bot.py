@@ -42,7 +42,7 @@ ALLOWED_USERS = os.getenv("ALLOWED_USERS", "").split(",")
 VPS_FILE = "/opt/reinstallos/vps_data.json"
 
 # Conversation states
-ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD = range(6)
+ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD, EDIT_PASS = range(7)
 
 
 # OS Options
@@ -158,9 +158,12 @@ def get_action_keyboard():
         ],
         [
             InlineKeyboardButton("🔓 Open All Port", callback_data="act_openport"),
-            InlineKeyboardButton("🗑 Hapus VPS", callback_data="act_delete"),
+            InlineKeyboardButton("🔑 Edit Password", callback_data="act_editpass"),
         ],
-        [InlineKeyboardButton("◀️ Kembali", callback_data="act_back")],
+        [
+            InlineKeyboardButton("🗑 Hapus VPS", callback_data="act_delete"),
+            InlineKeyboardButton("◀️ Kembali", callback_data="act_back"),
+        ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -396,6 +399,19 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return SELECT_VPS_ACTION
 
+    if action == "act_editpass":
+        keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
+        await query.edit_message_text(
+            get_vps_info_text(data) + "\n\n"
+            "  🔑 Edit Password VPS\n\n"
+            "  Kirim password baru:\n\n"
+            "  Contoh: `MyNewPass123`\n\n"
+            "  Password akan diubah via SSH.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return EDIT_PASS
+
     if action == "act_openport":
         await query.edit_message_text(
             "─────────────────────────────\n"
@@ -489,6 +505,75 @@ async def ssh_cmd_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
     return SSH_CMD
+
+
+async def edit_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle new password input and change it via SSH."""
+    data = context.user_data
+    new_pass = update.message.text.strip()
+
+    # Delete message (contains password)
+    try:
+        await update.message.delete()
+    except Exception:
+        pass
+
+    if not new_pass or len(new_pass) < 4:
+        await update.message.reply_text(
+            "❌ Password terlalu pendek (min 4 karakter).\n"
+            "Kirim ulang atau /start untuk batal.",
+        )
+        return EDIT_PASS
+
+    await update.message.reply_text(f"⏳ Mengubah password VPS {data['vps_ip']}...")
+
+    # Change password via SSH
+    change_cmd = (
+        f"echo 'root:{new_pass}' | chpasswd 2>/dev/null && "
+        f"echo '{data['vps_user']}:{new_pass}' | chpasswd 2>/dev/null && "
+        "echo 'PASS_CHANGED'"
+    )
+    result = await ssh_exec(data, change_cmd)
+
+    if "PASS_CHANGED" in result:
+        # Update saved VPS data
+        old_pass = data['vps_pass']
+        data['vps_pass'] = new_pass
+        context.user_data['vps_pass'] = new_pass
+
+        # Update in JSON file
+        user_id = update.effective_user.id
+        vps_list = load_vps_list(user_id)
+        for v in vps_list:
+            if v['vps_ip'] == data['vps_ip'] and v['vps_port'] == data['vps_port']:
+                v['vps_pass'] = new_pass
+                break
+        save_vps_list(user_id, vps_list)
+
+        keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ✅  Password Diubah!\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}:{data['vps_port']}\n"
+            f"  👤 User: {data['vps_user']}\n"
+            f"  🔑 Pass: {new_pass}\n\n"
+            "  Data VPS juga diupdate.\n\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ❌  Gagal Ubah Password\n"
+            "─────────────────────────────\n\n"
+            f"  {result}\n\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    return SELECT_VPS_ACTION
 
 
 # ============ SSH Helpers ============
@@ -1225,6 +1310,10 @@ def main() -> None:
             ],
             SSH_CMD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ssh_cmd_handler),
+                CallbackQueryHandler(handle_action, pattern="^act_"),
+            ],
+            EDIT_PASS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_pass_handler),
                 CallbackQueryHandler(handle_action, pattern="^act_"),
             ],
         },
