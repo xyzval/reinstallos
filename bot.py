@@ -1362,23 +1362,109 @@ async def cmd_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Standalone /status command."""
+    """Standalone /ping & /status command - bisa langsung /ping <ip> tanpa login."""
     if not is_authorized(update.effective_user.id):
         return
-    data = context.user_data
-    if not data.get("vps_ip"):
-        await update.message.reply_text("Gunakan /start untuk pilih VPS dulu.")
-        return
-    vps_ip = data["vps_ip"]
+    # Ambil IP: prioritaskan argumen /ping <ip>, fallback ke VPS aktif
+    args = context.args if hasattr(context, 'args') and context.args else []
+    # Fallback parse manual jika args kosong (kadang context.args tidak terisi)
+    if not args:
+        text = update.message.text or ""
+        parts = text.strip().split()
+        if len(parts) > 1:
+            args = parts[1:]
+
+    target_ip = None
+    if args:
+        # ambil token pertama yang mirip IP/domain
+        cand = args[0].strip()
+        # bersihkan format jika user kirim ip:port
+        if ":" in cand and cand.count(".") >= 3:
+            cand = cand.split(":")[0]
+        # validasi sederhana IP/hostname
+        if re.match(r"^[0-9.]+$", cand) or re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", cand) or re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", cand):
+            target_ip = cand
+        else:
+            await update.message.reply_text(
+                "─────────────────────────────\n"
+                "  📡  Ping VPS\n"
+                "─────────────────────────────\n\n"
+                f"  ❌ IP tidak valid: {cand}\n\n"
+                "  Contoh:\n"
+                "  `/ping 103.108.186.12`\n"
+                "  `/ping 8.8.8.8`\n\n"
+                "  Atau tanpa IP (cek VPS aktif):\n"
+                "  `/ping`",
+                parse_mode="Markdown"
+            )
+            return
+    else:
+        data = context.user_data
+        if data.get("vps_ip"):
+            target_ip = data["vps_ip"]
+        else:
+            await update.message.reply_text(
+                "─────────────────────────────\n"
+                "  📡  Ping VPS\n"
+                "─────────────────────────────\n\n"
+                "  Kirim IP untuk di-ping:\n\n"
+                "  `/ping 103.108.186.12`\n"
+                "  `/ping 8.8.8.8`\n\n"
+                "  Atau pilih VPS dulu:\n"
+                "  `/start` → pilih VPS → `/ping`",
+                parse_mode="Markdown"
+            )
+            return
+
+    vps_ip = target_ip
+    await update.message.reply_text(f"  📡 Ping {vps_ip}...")
+
+    # Cek ICMP ping
     proc = await asyncio.create_subprocess_exec(
-        "ping", "-c", "3", "-W", "5", vps_ip,
+        "ping", "-c", "3", "-W", "3", vps_ip,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     await proc.communicate()
-    if proc.returncode == 0:
-        await update.message.reply_text(f"✅ {vps_ip} ONLINE")
+    ping_ok = proc.returncode == 0
+
+    # Cek port SSH (22) dan RDP (3389)
+    async def check_port(ip, port):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            res = sock.connect_ex((ip, port))
+            sock.close()
+            return res == 0
+        except:
+            return False
+
+    ssh_ok, rdp_ok = await asyncio.gather(check_port(vps_ip, 22), check_port(vps_ip, 3389))
+
+    # Build status text
+    ping_txt = "✅ ONLINE" if ping_ok else "❌ OFFLINE"
+    ssh_txt = "✅ OPEN" if ssh_ok else "❌ CLOSED"
+    rdp_txt = "✅ OPEN" if rdp_ok else "❌ CLOSED"
+
+    # Kesimpulan
+    if ping_ok or ssh_ok or rdp_ok:
+        overall = "✅ VPS ONLINE"
     else:
-        await update.message.reply_text(f"❌ {vps_ip} OFFLINE")
+        overall = "❌ VPS OFFLINE"
+
+    await update.message.reply_text(
+        "─────────────────────────────\n"
+        "  📡  Ping Result\n"
+        "─────────────────────────────\n\n"
+        f"  🎯 {vps_ip}\n"
+        f"  {overall}\n\n"
+        "─────────────────────────────\n"
+        f"  🏓 Ping (ICMP): {ping_txt}\n"
+        f"  🔐 SSH 22:      {ssh_txt}\n"
+        f"  🖥️ RDP 3389:     {rdp_txt}\n"
+        "─────────────────────────────\n\n"
+        "  Tip: `/ping 104.207.93.92:22022` juga bisa (auto ambil IP)",
+        parse_mode="Markdown"
+    )
 
 
 async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
