@@ -245,13 +245,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "  🖥️  Reinstall OS Bot\n"
             "─────────────────────────────\n\n"
             "  Belum ada VPS tersimpan.\n"
-            "  Kirim detail VPS dengan format:\n\n"
-            "  `ip:port@user:password`\n\n"
-            "  Contoh:\n"
-            "  `104.207.xx.xx:22022@root:Digicore@1`",
-            parse_mode="Markdown",
+            "  Pilih cara tambah VPS:\n",
+            reply_markup=get_add_method_keyboard(),
         )
-        return ADD_VPS
+        return SELECT_VPS_ACTION
 
 
 async def add_vps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1558,7 +1555,10 @@ def main() -> None:
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            ADD_VPS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_vps_handler)],
+            ADD_VPS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, add_vps_handler),
+                CallbackQueryHandler(select_vps, pattern="^(selvps_|addvps|add_)"),
+            ],
             SELECT_VPS_ACTION: [
                 CallbackQueryHandler(select_vps, pattern="^(selvps_|addvps|add_)"),
                 CallbackQueryHandler(handle_action, pattern="^act_"),
