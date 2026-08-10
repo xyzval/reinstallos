@@ -42,7 +42,7 @@ ALLOWED_USERS = os.getenv("ALLOWED_USERS", "").split(",")
 VPS_FILE = "/opt/reinstallos/vps_data.json"
 
 # Conversation states
-ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD, EDIT_PASS = range(7)
+ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD, EDIT_PASS, WIZ_IP, WIZ_PORT, WIZ_USER, WIZ_PASS = range(11)
 
 
 # OS Options
@@ -179,6 +179,46 @@ def get_vps_info_text(data: dict) -> str:
     )
 
 
+def get_wizard_port_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("22 (default)", callback_data="wiz_port_22"),
+         InlineKeyboardButton("22022", callback_data="wiz_port_22022")],
+        [InlineKeyboardButton("2222", callback_data="wiz_port_2222"),
+         InlineKeyboardButton("✏️ Custom", callback_data="wiz_port_custom")],
+        [InlineKeyboardButton("❌ Batal", callback_data="wiz_cancel")],
+    ])
+
+def get_wizard_user_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("root", callback_data="wiz_user_root"),
+         InlineKeyboardButton("ubuntu", callback_data="wiz_user_ubuntu")],
+        [InlineKeyboardButton("admin", callback_data="wiz_user_admin"),
+         InlineKeyboardButton("✏️ Ketik Manual", callback_data="wiz_user_custom")],
+        [InlineKeyboardButton("❌ Batal", callback_data="wiz_cancel")],
+    ])
+
+def get_add_method_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🚀 Wizard Cepat (klik-klik)", callback_data="add_wizard")],
+        [InlineKeyboardButton("📋 Format Lengkap", callback_data="add_format")],
+        [InlineKeyboardButton("📂 Bulk Import", callback_data="add_bulk")],
+        [InlineKeyboardButton("◀️ Kembali", callback_data="add_back")],
+    ])
+
+def get_bulk_example_text():
+    return (
+        "─────────────────────────────\n"
+        "  📂 Bulk Import\n"
+        "─────────────────────────────\n\n"
+        "Kirim banyak VPS sekaligus, 1 baris 1 VPS:\n\n"
+        "`104.207.93.92:22022@root:Pass123`\n"
+        "`1.2.3.4:22@root:MyPass`\n"
+        "`5.6.7.8@root:Pass` (port auto 22)\n\n"
+        "Bot akan test & simpan yang valid. 🔍"
+    )
+
+
+
 
 # ============ Handlers ============
 
@@ -234,6 +274,42 @@ async def add_vps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception:
         pass
 
+    # Bulk detection: multiple lines
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if len(lines) > 1:
+        # Bulk import
+        saved = 0
+        failed = []
+        vps_list = load_vps_list(update.effective_user.id)
+        for line in lines:
+            d = parse_vps_detail(line)
+            if d:
+                exists = any(v['vps_ip']==d['vps_ip'] and v['vps_port']==d['vps_port'] for v in vps_list)
+                if not exists:
+                    vps_list.append(d)
+                    saved += 1
+            else:
+                failed.append(line)
+        if saved>0:
+            save_vps_list(update.effective_user.id, vps_list)
+            # Use last valid as active
+            last = None
+            for line in reversed(lines):
+                last = parse_vps_detail(line)
+                if last:
+                    break
+            if last:
+                context.user_data.update(last)
+                await update.message.reply_text(
+                    f"─────────────────────────────\n  📂 Bulk Import\n─────────────────────────────\n\n  ✅ {saved} VPS disimpan\n  ❌ {len(failed)} gagal\n\n" + get_vps_info_text(last) + "\n\n  Pilih aksi:",
+                    reply_markup=get_action_keyboard(),
+                )
+                try: await update.message.delete()
+                except: pass
+                return SELECT_VPS_ACTION
+        await update.message.reply_text(f"❌ Gagal bulk. {len(failed)} baris error. Cek format `ip:port@user:pass` per baris.")
+        return ADD_VPS
+
     # Save to VPS list
     user_id = update.effective_user.id
     vps_list = load_vps_list(user_id)
@@ -255,6 +331,157 @@ async def add_vps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 
+# ============ Wizard Handlers ============
+async def wiz_ip_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    ip = update.message.text.strip()
+    # basic validation
+    import re
+    if not re.match(r"^[0-9.]+$|^[a-zA-Z0-9.-]+$", ip) or len(ip) < 7:
+        await update.message.reply_text("❌ IP tidak valid. Contoh: `104.207.93.92`", parse_mode="Markdown")
+        return WIZ_IP
+    context.user_data["wiz"]["vps_ip"] = ip
+    await update.message.reply_text(
+        f"✅ IP: `{ip}`\n\n"
+        "─────────────────────────────\n"
+        "  🚀 Step 2/4 - Pilih Port SSH\n"
+        "─────────────────────────────",
+        parse_mode="Markdown",
+        reply_markup=get_wizard_port_keyboard(),
+    )
+    return WIZ_PORT
+
+async def wiz_port_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    d = query.data
+    if d == "wiz_cancel":
+        await query.edit_message_text("❌ Dibatalkan.", reply_markup=get_vps_list_keyboard(update.effective_user.id))
+        return SELECT_VPS_ACTION
+    if d == "wiz_port_custom":
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ✏️ Port Custom\n"
+            "─────────────────────────────\n\n"
+            "Ketik port manual (contoh: `22022`):",
+            parse_mode="Markdown",
+        )
+        return WIZ_PORT
+    # preset port
+    port = int(d.replace("wiz_port_", ""))
+    context.user_data["wiz"]["vps_port"] = port
+    await query.edit_message_text(
+        f"✅ Port: `{port}`\n\n"
+        "─────────────────────────────\n"
+        "  🚀 Step 3/4 - Pilih User\n"
+        "─────────────────────────────",
+        parse_mode="Markdown",
+        reply_markup=get_wizard_user_keyboard(),
+    )
+    return WIZ_USER
+
+async def wiz_port_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        port = int(update.message.text.strip())
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except:
+        await update.message.reply_text("❌ Port harus angka 1-65535. Contoh: `22` atau `22022`")
+        return WIZ_PORT
+    context.user_data["wiz"]["vps_port"] = port
+    await update.message.reply_text(
+        f"✅ Port: `{port}`\n\n"
+        "─────────────────────────────\n"
+        "  🚀 Step 3/4 - Pilih User\n"
+        "─────────────────────────────",
+        reply_markup=get_wizard_user_keyboard(),
+    )
+    return WIZ_USER
+
+async def wiz_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    d = query.data
+    if d == "wiz_cancel":
+        await query.edit_message_text("❌ Dibatalkan.", reply_markup=get_vps_list_keyboard(update.effective_user.id))
+        return SELECT_VPS_ACTION
+    if d == "wiz_user_custom":
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ✏️ User Custom\n"
+            "─────────────────────────────\n\n"
+            "Ketik username (contoh: `root`):",
+            parse_mode="Markdown",
+        )
+        return WIZ_USER
+    user = d.replace("wiz_user_", "")
+    context.user_data["wiz"]["vps_user"] = user
+    wiz = context.user_data["wiz"]
+    await query.edit_message_text(
+        f"✅ User: `{user}`\n\n"
+        "─────────────────────────────\n"
+        "  🚀 Step 4/4 - Password\n"
+        "─────────────────────────────\n\n"
+        f"  🎯 {wiz['vps_ip']}:{wiz['vps_port']}@{wiz['vps_user']}:****\n\n"
+        "Kirim password VPS:",
+        parse_mode="Markdown",
+    )
+    return WIZ_PASS
+
+async def wiz_user_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.message.text.strip()
+    if not user or " " in user:
+        await update.message.reply_text("❌ Username tidak valid. Contoh: `root`")
+        return WIZ_USER
+    context.user_data["wiz"]["vps_user"] = user
+    wiz = context.user_data["wiz"]
+    await update.message.reply_text(
+        f"✅ User: `{user}`\n\n"
+        "─────────────────────────────\n"
+        "  🚀 Step 4/4 - Password\n"
+        "─────────────────────────────\n\n"
+        f"  🎯 {wiz['vps_ip']}:{wiz['vps_port']}@{wiz['vps_user']}:****\n\n"
+        "Kirim password VPS:",
+        parse_mode="Markdown",
+    )
+    return WIZ_PASS
+
+async def wiz_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    pwd = update.message.text.strip()
+    try:
+        await update.message.delete()
+    except:
+        pass
+    if len(pwd) < 3:
+        await update.message.reply_text("❌ Password terlalu pendek.")
+        return WIZ_PASS
+    wiz = context.user_data.get("wiz", {})
+    data = {
+        "vps_ip": wiz.get("vps_ip"),
+        "vps_port": wiz.get("vps_port", 22),
+        "vps_user": wiz.get("vps_user", "root"),
+        "vps_pass": pwd,
+    }
+    # Test koneksi cepat
+    await update.message.reply_text(f"⏳ Test koneksi ke {data['vps_ip']}:{data['vps_port']}...")
+    test = await ssh_exec(data, "echo OK")
+    ok = "OK" in test
+    status = "✅ Koneksi OK" if ok else f"⚠️ Test gagal: {test[:80]} - tetap disimpan"
+
+    # Save
+    user_id = update.effective_user.id
+    vps_list = load_vps_list(user_id)
+    exists = any(v['vps_ip']==data['vps_ip'] and v['vps_port']==data['vps_port'] for v in vps_list)
+    if not exists:
+        vps_list.append(data)
+        save_vps_list(user_id, vps_list)
+    context.user_data.update(data)
+    context.user_data.pop("wiz", None)
+    await update.message.reply_text(
+        get_vps_info_text(data) + f"\n\n  {status}\n\n  ✅ VPS tersimpan!\n\n  Pilih aksi:",
+        reply_markup=get_action_keyboard(),
+    )
+    return SELECT_VPS_ACTION
+
 async def select_vps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Handle VPS selection or add new."""
     query = update.callback_query
@@ -267,13 +494,52 @@ async def select_vps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "─────────────────────────────\n"
             "  ➕  Tambah VPS Baru\n"
             "─────────────────────────────\n\n"
+            "  Pilih cara tambah biar gampang:\n",
+            reply_markup=get_add_method_keyboard(),
+        )
+        return SELECT_VPS_ACTION
+
+    # Handle add method choices
+    if query.data == "add_wizard":
+        context.user_data["wiz"] = {}
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  🚀 Wizard Cepat - Step 1/4\n"
+            "─────────────────────────────\n\n"
+            "  📍 Kirim IP VPS saja:\n\n"
+            "  Contoh: `104.207.93.92`\n\n"
+            "  (hanya IP, tanpa port/user/pass)",
+            parse_mode="Markdown",
+        )
+        return WIZ_IP
+    if query.data == "add_format":
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  📋 Format Lengkap\n"
+            "─────────────────────────────\n\n"
             "  Kirim detail VPS:\n\n"
             "  `ip:port@user:password`\n\n"
             "  Contoh:\n"
-            "  `104.207.xx.xx:22022@root:Digicore@1`",
+            "  `104.207.xx.xx:22022@root:Digicore@1`\n\n"
+            "  Port kosong = auto 22",
             parse_mode="Markdown",
         )
         return ADD_VPS
+    if query.data == "add_bulk":
+        await query.edit_message_text(
+            get_bulk_example_text(),
+            parse_mode="Markdown",
+        )
+        return ADD_VPS
+    if query.data == "add_back":
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  🖥️  Reinstall OS Bot\n"
+            "─────────────────────────────\n\n"
+            "  Pilih VPS atau tambah baru:\n",
+            reply_markup=get_vps_list_keyboard(user_id),
+        )
+        return SELECT_VPS_ACTION
 
     if query.data.startswith("selvps_"):
         idx = int(query.data.replace("selvps_", ""))
@@ -1294,10 +1560,22 @@ def main() -> None:
         states={
             ADD_VPS: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_vps_handler)],
             SELECT_VPS_ACTION: [
-                CallbackQueryHandler(select_vps, pattern="^(selvps_|addvps)"),
+                CallbackQueryHandler(select_vps, pattern="^(selvps_|addvps|add_)"),
                 CallbackQueryHandler(handle_action, pattern="^act_"),
                 CallbackQueryHandler(select_os_category, pattern="^cat_"),
             ],
+            WIZ_IP: [MessageHandler(filters.TEXT & ~filters.COMMAND, wiz_ip_handler)],
+            WIZ_PORT: [
+                CallbackQueryHandler(wiz_port_callback, pattern="^wiz_port_"),
+                CallbackQueryHandler(wiz_port_callback, pattern="^wiz_cancel"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wiz_port_text_handler),
+            ],
+            WIZ_USER: [
+                CallbackQueryHandler(wiz_user_callback, pattern="^wiz_user_"),
+                CallbackQueryHandler(wiz_user_callback, pattern="^wiz_cancel"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wiz_user_text_handler),
+            ],
+            WIZ_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, wiz_pass_handler)],
             SELECT_OS: [
                 CallbackQueryHandler(select_os, pattern="^os_"),
                 CallbackQueryHandler(select_os_category, pattern="^cat_"),
