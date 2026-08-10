@@ -1487,7 +1487,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /ssh CMD  - SSH command\n"
         "  /reboot   - Reboot VPS\n"
         "  /shutdown - Shutdown VPS\n"
-        "  /status   - Cek online\n"
+        "  /ping     - Cek online (alias /status)\n"
         "  /update   - Update bot dari GitHub\n"
         "  /help     - Bantuan\n\n"
         "Tambah VPS:\n"
@@ -1515,7 +1515,7 @@ async def post_init(application):
         BotCommand("ssh", "SSH command"),
         BotCommand("reboot", "Reboot VPS"),
         BotCommand("shutdown", "Shutdown VPS"),
-        BotCommand("status", "Cek online/offline"),
+        BotCommand("ping", "Cek online/offline"),
         BotCommand("update", "Update bot dari GitHub"),
         BotCommand("help", "Bantuan"),
     ]
@@ -1605,6 +1605,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reboot", cmd_reboot))
     app.add_handler(CommandHandler("shutdown", cmd_shutdown))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("ping", cmd_status))
     app.add_handler(CommandHandler("update", cmd_update))
     app.add_handler(CommandHandler("help", cmd_help))
 
