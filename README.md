@@ -19,6 +19,11 @@ bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/instal
 > sudo bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/install.sh)
 > ```
 
+> 💡 **Link di atas tidak bisa / error `curl: (35)` / SSL?** Itu karena host
+> `raw.githubusercontent.com` sering diblokir atau tidak bisa diakses dari
+> jaringan Indonesia. **Reponya normal** — cukup gunakan salah satu cara
+> cadangan di bawah 👇
+
 ### Apa yang dilakukan installer:
 - ✅ Install semua dependencies otomatis (Python, pip, git, dll)
 - ✅ Download bot dari GitHub ke `/opt/reinstallos`
@@ -189,6 +194,11 @@ Jalankan langsung di VPS yang mau di-reinstall:
 wget -O reinstall.sh https://raw.githubusercontent.com/xyzval/reinstallos/main/reinstall.sh && chmod +x reinstall.sh && bash reinstall.sh
 ```
 
+Jika `raw.githubusercontent.com` diblokir di jaringanmu, gunakan CDN mirror:
+```bash
+wget -O reinstall.sh https://cdn.jsdelivr.net/gh/xyzval/reinstallos@main/reinstall.sh && chmod +x reinstall.sh && bash reinstall.sh
+```
+
 Pilih nomor OS dari menu, selesai!
 
 ---
@@ -293,6 +303,39 @@ systemctl daemon-reload
 
 ## ❓ FAQ / Troubleshooting
 
+### Link install `raw.githubusercontent.com` tidak bisa / error SSL (curl: 35)?
+
+Penyebabnya jaringan (biasanya ISP Indonesia memblokir host `raw.githubusercontent.com`),
+**bukan** karena repo rusak. Repo `xyzval/reinstallos` valid dan file `install.sh` ada.
+Gunakan salah satu cara di bawah ini yang TIDAK lewat `raw.githubusercontent.com`:
+
+**Cara A — Lewat CDN mirror (jsDelivr):**
+```bash
+bash <(curl -sL https://cdn.jsdelivr.net/gh/xyzval/reinstallos@main/install.sh)
+```
+Untuk yang belum root:
+```bash
+sudo bash <(curl -sL https://cdn.jsdelivr.net/gh/xyzval/reinstallos@main/install.sh)
+```
+
+**Cara B — Git clone + jalankan lokal (paling aman):**
+```bash
+git clone https://github.com/xyzval/reinstallos.git /opt/reinstallos
+cd /opt/reinstallos && bash install.sh
+```
+
+**Cara C — Manual penuh (tanpa installer):**
+```bash
+git clone https://github.com/xyzval/reinstallos.git
+cd reinstallos
+pip install -r requirements.txt
+cp .env.example .env
+nano .env          # isi BOT_TOKEN
+python3 bot.py
+```
+
+> Setelah itu, service systemd (`reinstall-bot`) tetap dibuat normal dan bot jalan 24/7.
+
 ### Bot tidak jalan setelah install?
 ```bash
 journalctl -u reinstall-bot -n 30
@@ -313,9 +356,11 @@ systemctl status reinstall-bot
 ```
 
 ### Install gagal di tengah jalan?
-Jalankan ulang installer:
+Jalankan ulang installer (ganti dengan CDN mirror jika `raw.githubusercontent.com` diblokir):
 ```bash
 bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/install.sh)
+# atau:
+bash <(curl -sL https://cdn.jsdelivr.net/gh/xyzval/reinstallos@main/install.sh)
 ```
 Installer akan update yang sudah ada.
 

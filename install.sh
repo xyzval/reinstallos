@@ -59,6 +59,9 @@ check_root() {
         echo "  Jalankan ulang dengan:"
         echo -e "  ${BOLD}sudo bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/install.sh)${NC}"
         echo ""
+        echo "  Jika raw.githubusercontent.com diblokir, pakai CDN mirror:"
+        echo -e "  ${BOLD}sudo bash <(curl -sL https://cdn.jsdelivr.net/gh/xyzval/reinstallos@main/install.sh)${NC}"
+        echo ""
         exit 1
     fi
 }
@@ -258,6 +261,8 @@ print_failure() {
     echo ""
     echo -e "  Jalankan ulang installer:"
     echo -e "  ${BOLD}bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/install.sh)${NC}"
+    echo -e "  Atau (jika raw.githubusercontent.com diblokir):"
+    echo -e "  ${BOLD}bash <(curl -sL https://cdn.jsdelivr.net/gh/xyzval/reinstallos@main/install.sh)${NC}"
     echo ""
 }
 
