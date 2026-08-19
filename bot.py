@@ -43,7 +43,7 @@ ALLOWED_USERS = os.getenv("ALLOWED_USERS", "").split(",")
 VPS_FILE = "/opt/reinstallos/vps_data.json"
 
 # Conversation states
-ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD, EDIT_PASS, WIZ_IP, WIZ_PORT, WIZ_USER, WIZ_PASS = range(11)
+ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD, EDIT_PASS, WIZ_IP, WIZ_PORT, WIZ_USER, WIZ_PASS, EDIT_PORT = range(12)
 
 
 # OS Options
@@ -162,7 +162,10 @@ def get_action_keyboard():
             InlineKeyboardButton("🔑 Edit Password", callback_data="act_editpass"),
         ],
         [
+            InlineKeyboardButton("🔧 Edit Port", callback_data="act_editport"),
             InlineKeyboardButton("🗑 Hapus VPS", callback_data="act_delete"),
+        ],
+        [
             InlineKeyboardButton("◀️ Kembali", callback_data="act_back"),
         ],
     ]
@@ -676,6 +679,22 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
         return EDIT_PASS
 
+    if action == "act_editport":
+        keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
+        await query.edit_message_text(
+            get_vps_info_text(data) + "\n\n"
+            "  🔧 Edit Port SSH\n\n"
+            f"  Port sekarang: `{data['vps_port']}`\n\n"
+            "  Kirim port baru yang mau DITAMBAHKAN & diaktifkan\n"
+            "  (contoh: `22`).\n\n"
+            "  ⚠️ Port lama (`22022` dll) akan DIPERTAHANKAN,\n"
+            "  jadi dua-duanya tetap aktif.\n\n"
+            "  Contoh: `22`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return EDIT_PORT
+
     if action == "act_openport":
         await query.edit_message_text(
             "─────────────────────────────\n"
@@ -833,6 +852,110 @@ async def edit_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "  ❌  Gagal Ubah Password\n"
             "─────────────────────────────\n\n"
             f"  {result}\n\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+
+    return SELECT_VPS_ACTION
+
+
+async def edit_port_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle port input: add a new SSH port on the server (keep existing ports)."""
+    data = context.user_data
+    new_port_text = update.message.text.strip()
+
+    try:
+        new_port = int(new_port_text)
+        if not 1 <= new_port <= 65535:
+            raise ValueError
+    except (ValueError, TypeError):
+        await update.message.reply_text(
+            "❌ Port harus angka 1-65535. Contoh: `22`\n"
+            "Kirim ulang atau /start untuk batal.",
+            parse_mode="Markdown",
+        )
+        return EDIT_PORT
+
+    if new_port == data.get('vps_port'):
+        await update.message.reply_text(
+            f"✅ Port `{new_port}` sudah terpakai di VPS ini.\n"
+            "Kirim port lain (contoh: `22`) atau /start.",
+            parse_mode="Markdown",
+        )
+        return EDIT_PORT
+
+    cur_port = data['vps_port']
+    await update.message.reply_text(
+        f"⏳ Menambahkan port {new_port} ke server {data['vps_ip']}...\n"
+        "(port lama tetap dipertahankan)"
+    )
+
+    # Robust script: keep all existing active Ports + add the new one, then restart sshd
+    cmd = f'''
+set -e
+CFG=/etc/ssh/sshd_config
+if [ ! -f "$CFG" ]; then echo "NO_CONFIG"; exit 1; fi
+# kumpulkan semua port aktif yang sudah ada (skip baris komentar)
+PORTS=$(grep -E '^[[:space:]]*Port[[:space:]]' "$CFG" | awk '{{print $2}}' || true)
+# tambahkan port baru bila belum ada
+if ! echo "$PORTS" | grep -qw {new_port}; then
+    PORTS="$PORTS {new_port}"
+fi
+# hapus semua direktif Port (aktif & komentar) lalu tulis ulang
+sed -i '/^[[:space:]]*#\\?[[:space:]]*Port[[:space:]]/d' "$CFG"
+for p in $PORTS; do echo "Port $p" >> "$CFG"; done
+# restart sshd (maksimal 2x, tunggu antara)
+systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
+sleep 2
+echo "PORTS_NOW: $(grep -E '^[[:space:]]*Port[[:space:]]' "$CFG" | awk '{{print $2}}' | tr '\\n' ' ')"
+echo "PORT_DONE"
+'''
+    result = await ssh_exec(data, cmd)
+
+    if "PORT_DONE" in result:
+        # Verify new port is actually reachable
+        test_data = dict(data)
+        test_data["vps_port"] = new_port
+        test = await ssh_exec(test_data, "echo OK")
+        test_ok = "OK" in test
+
+        # Update stored VPS port to the new one (both ports remain active on server)
+        old_port = cur_port
+        data['vps_port'] = new_port
+        context.user_data['vps_port'] = new_port
+
+        user_id = update.effective_user.id
+        vps_list = load_vps_list(user_id)
+        for v in vps_list:
+            if v['vps_ip'] == data['vps_ip'] and v['vps_port'] == old_port:
+                v['vps_port'] = new_port
+                break
+        save_vps_list(user_id, vps_list)
+
+        ports_line = next((ln for ln in result.splitlines() if "PORTS_NOW:" in ln), "")
+        status = "✅ Koneksi ke port baru OK" if test_ok else f"⚠️ Port baru belum bisa dihubungi: {test[:80]}"
+
+        keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ✅  Port Ditambahkan!\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {data['vps_ip']}\n"
+            f"  {ports_line}\n\n"
+            f"  {status}\n\n"
+            "  Port lama & baru sama-sama aktif di server.\n"
+            "  Data bot diupdate ke port baru.\n\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+    else:
+        keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ❌  Gagal Edit Port\n"
+            "─────────────────────────────\n\n"
+            f"  {result}\n\n"
+            "  Periksa apakah port lama masih bisa akses.\n\n"
             "─────────────────────────────",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
@@ -1577,6 +1700,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /ping     - Cek online (alias /status)\n"
         "  /update   - Update bot dari GitHub\n"
         "  /help     - Bantuan\n\n"
+        "Menu VPS:\n"
+        "  🔧 Edit Port  - Tambah/aktifkan port SSH baru (port lama tetap jalan)\n\n"
         "Tambah VPS:\n"
         "  Kirim langsung: ip:port@user:password\n\n"
         "Password:\n"
@@ -1679,6 +1804,10 @@ def main() -> None:
             ],
             EDIT_PASS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_pass_handler),
+                CallbackQueryHandler(handle_action, pattern="^act_"),
+            ],
+            EDIT_PORT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_port_handler),
                 CallbackQueryHandler(handle_action, pattern="^act_"),
             ],
         },
