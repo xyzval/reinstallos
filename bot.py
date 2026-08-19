@@ -40,7 +40,13 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ALLOWED_USERS = os.getenv("ALLOWED_USERS", "").split(",")
-VPS_FILE = "/opt/reinstallos/vps_data.json"
+
+# Direktori tempat bot.py berada (bukan hardcode /opt/reinstallos), supaya /update
+# dan penyimpanan data tetap benar walau bot diinstall di folder lain.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+VPS_FILE = os.path.join(BASE_DIR, "vps_data.json")
+RESTART_NOTIFY_FILE = os.path.join(BASE_DIR, ".restart_notify")
+SERVICE_NAME = os.getenv("SERVICE_NAME", "reinstall-bot")
 
 # Conversation states
 ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD, EDIT_PASS, WIZ_IP, WIZ_PORT, WIZ_USER, WIZ_PASS, EDIT_PORT = range(12)
@@ -1591,89 +1597,200 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
-async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Update bot dari GitHub (git pull) dan restart service."""
+async def _git(*args, cwd=None):
+    """Jalankan perintah git, kembalikan (returncode, stdout, stderr)."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd or BASE_DIR,
+    )
+    stdout, stderr = await proc.communicate()
+    return (
+        proc.returncode,
+        stdout.decode("utf-8", errors="ignore").strip(),
+        stderr.decode("utf-8", errors="ignore").strip(),
+    )
+
+
+async def _rev(ref):
+    """Resolve ref jadi commit hash. Kembalikan "" kalau ref tidak ada.
+
+    Catatan: tanpa --verify --quiet, git rev-parse mencetak balik nama ref-nya
+    saat gagal, sehingga hasilnya terlihat valid padahal bukan.
+    """
+    rc, out, _ = await _git("rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    return out if rc == 0 else ""
+
+
+async def _git_state():
+    """Ambil kondisi repo lokal: commit, subjek, dirty, dan commit remote."""
+    local = await _rev("HEAD")
+    _, subject, _ = await _git("log", "-1", "--format=%h %s (%cr)")
+    _, dirty, _ = await _git("status", "--porcelain")
+    remote = await _rev("origin/main")
+    return local, subject, bool(dirty.strip()), remote
+
+
+async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tampilkan versi bot yang sedang jalan (commit git)."""
     if not is_authorized(update.effective_user.id):
+        return
+
+    if not os.path.isdir(os.path.join(BASE_DIR, ".git")):
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ⚠️  Bukan Instalasi Git\n"
+            "─────────────────────────────\n\n"
+            f"  Folder: {BASE_DIR}\n"
+            "  Tidak ada .git, jadi /update tidak bisa jalan.\n\n"
+            "  Install ulang dengan install.sh.\n\n"
+            "─────────────────────────────"
+        )
+        return
+
+    await _git("fetch", "origin", "main")
+    local, subject, dirty, remote = await _git_state()
+    _, behind, _ = await _git("rev-list", "--count", "HEAD..origin/main")
+
+    if not local or not remote:
+        status = "❓ Tidak bisa dibandingkan dengan GitHub"
+    elif local == remote and not dirty:
+        status = "✅ Sudah sama dengan GitHub (main)"
+    elif dirty:
+        status = "⚠️ Ada file yang dimodifikasi lokal"
+    else:
+        status = f"🔄 Ketinggalan {behind or '?'} commit — jalankan /update"
+
+    await update.message.reply_text(
+        "─────────────────────────────\n"
+        "  ℹ️  Versi Bot\n"
+        "─────────────────────────────\n\n"
+        f"  Folder  : {BASE_DIR}\n"
+        f"  Commit  : {subject or local[:7] or '-'}\n"
+        f"  GitHub  : {remote[:7] if remote else '-'}\n"
+        f"  Status  : {status}\n\n"
+        "─────────────────────────────"
+    )
+
+
+async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Update bot dari GitHub (git fetch + reset --hard) dan restart service.
+
+    Pakai '/update force' untuk memaksa reset + restart walau terlihat sudah terbaru.
+    """
+    if not is_authorized(update.effective_user.id):
+        return
+
+    force = bool(context.args) and context.args[0].lower() in ("force", "-f", "paksa")
+
+    if not os.path.isdir(os.path.join(BASE_DIR, ".git")):
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ❌  Update Tidak Bisa Jalan\n"
+            "─────────────────────────────\n\n"
+            f"  Folder bot: {BASE_DIR}\n"
+            "  Folder ini bukan clone git (.git tidak ada),\n"
+            "  jadi tidak ada yang bisa ditarik dari GitHub.\n\n"
+            "  Perbaiki dengan install ulang:\n"
+            "  bash <(curl -sL https://raw.githubusercontent.com/"
+            "xyzval/reinstallos/main/install.sh)\n\n"
+            "─────────────────────────────"
+        )
         return
 
     await update.message.reply_text("⏳ Mengupdate bot dari GitHub...")
 
     try:
-        # Fetch latest dari remote
-        proc = await asyncio.create_subprocess_exec(
-            "git", "fetch", "origin", "main",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd="/opt/reinstallos",
-        )
-        await proc.communicate()
+        # 1. Fetch — kegagalan HARUS dilaporkan, jangan diam-diam "sudah terbaru"
+        rc, out, err = await _git("fetch", "origin", "main")
+        if rc != 0:
+            await update.message.reply_text(
+                "─────────────────────────────\n"
+                "  ❌  Gagal Ambil Data GitHub\n"
+                "─────────────────────────────\n\n"
+                f"  {err or out or 'git fetch gagal'}\n\n"
+                "  Cek koneksi internet / DNS VPS.\n\n"
+                "─────────────────────────────"
+            )
+            return
 
-        # Cek apakah ada perbedaan
-        proc = await asyncio.create_subprocess_exec(
-            "git", "diff", "HEAD", "origin/main", "--stat",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd="/opt/reinstallos",
-        )
-        stdout, stderr = await proc.communicate()
-        diff_output = stdout.decode('utf-8', errors='ignore').strip()
+        # 2. Bandingkan commit lokal vs remote (bukan cuma diff isi file)
+        local, subject, dirty, remote = await _git_state()
 
-        if not diff_output:
+        if not remote:
+            await update.message.reply_text(
+                "─────────────────────────────\n"
+                "  ❌  Branch main Tidak Ditemukan\n"
+                "─────────────────────────────\n\n"
+                "  Remote origin/main tidak ada di VPS ini.\n"
+                "  Cek dengan: git -C " + BASE_DIR + " remote -v\n\n"
+                "─────────────────────────────"
+            )
+            return
+
+        if local == remote and not dirty and not force:
             await update.message.reply_text(
                 "─────────────────────────────\n"
                 "  ✅  Bot Sudah Terbaru\n"
                 "─────────────────────────────\n\n"
-                "  Tidak ada perubahan baru.\n\n"
+                f"  Commit: {subject or local[:7]}\n"
+                f"  Sama dengan GitHub ({remote[:7]}).\n\n"
+                "  Tombol lama di chat tidak ikut berubah.\n"
+                "  Kirim /start untuk memuat menu baru.\n"
+                "  Paksa update: /update force\n\n"
                 "─────────────────────────────"
             )
             return
 
-        # Reset ke versi terbaru dari GitHub
-        proc = await asyncio.create_subprocess_exec(
-            "git", "reset", "--hard", "origin/main",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd="/opt/reinstallos",
-        )
-        stdout, stderr = await proc.communicate()
-        git_output = stdout.decode('utf-8', errors='ignore').strip()
-        git_error = stderr.decode('utf-8', errors='ignore').strip()
-
-        if proc.returncode != 0:
+        # 3. Reset ke versi GitHub (sekaligus buang perubahan lokal yang nyangkut)
+        rc, out, err = await _git("reset", "--hard", "origin/main")
+        if rc != 0:
             await update.message.reply_text(
                 "─────────────────────────────\n"
                 "  ❌  Update Gagal\n"
                 "─────────────────────────────\n\n"
-                f"  Error:\n  {git_error or git_output}\n\n"
+                f"  Error:\n  {err or out}\n\n"
                 "─────────────────────────────"
             )
             return
 
-        # Ada update, kirim info lalu restart
+        _, new_subject, _ = await _git("log", "-1", "--format=%h %s")
+
         await update.message.reply_text(
             "─────────────────────────────\n"
             "  🔄  Update Berhasil!\n"
             "─────────────────────────────\n\n"
-            f"  {diff_output}\n\n"
+            f"  Sebelum : {subject or local[:7] or '-'}\n"
+            f"  Sesudah : {new_subject or remote[:7]}\n\n"
             "  ⏳ Merestart bot...\n"
             "─────────────────────────────"
         )
 
         # Simpan chat_id untuk kirim notif setelah restart
-        restart_file = "/opt/reinstallos/.restart_notify"
         try:
-            with open(restart_file, 'w') as f:
+            with open(RESTART_NOTIFY_FILE, 'w') as f:
                 json.dump({"chat_id": update.effective_chat.id}, f)
         except Exception:
             pass
 
         # Restart service (bot akan mati dan hidup lagi otomatis)
         proc = await asyncio.create_subprocess_exec(
-            "systemctl", "restart", "reinstall-bot",
+            "systemctl", "restart", SERVICE_NAME,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.communicate()
+        _, rst_err = await proc.communicate()
+
+        if proc.returncode != 0:
+            await update.message.reply_text(
+                "─────────────────────────────\n"
+                "  ⚠️  Kode Terupdate, Restart Gagal\n"
+                "─────────────────────────────\n\n"
+                f"  {rst_err.decode('utf-8', errors='ignore').strip() or 'systemctl gagal'}\n\n"
+                f"  Restart manual:\n  systemctl restart {SERVICE_NAME}\n\n"
+                "─────────────────────────────"
+            )
 
     except Exception as e:
         await update.message.reply_text(
@@ -1699,6 +1816,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /shutdown - Shutdown VPS\n"
         "  /ping     - Cek online (alias /status)\n"
         "  /update   - Update bot dari GitHub\n"
+        "  /version  - Cek versi bot yang jalan\n"
         "  /help     - Bantuan\n\n"
         "Menu VPS:\n"
         "  🔧 Edit Port  - Tambah/aktifkan port SSH baru (port lama tetap jalan)\n\n"
@@ -1729,12 +1847,13 @@ async def post_init(application):
         BotCommand("shutdown", "Shutdown VPS"),
         BotCommand("ping", "Cek online/offline"),
         BotCommand("update", "Update bot dari GitHub"),
+        BotCommand("version", "Cek versi bot yang jalan"),
         BotCommand("help", "Bantuan"),
     ]
     await application.bot.set_my_commands(commands)
 
     # Kirim notifikasi restart berhasil jika ada
-    restart_file = "/opt/reinstallos/.restart_notify"
+    restart_file = RESTART_NOTIFY_FILE
     try:
         if os.path.exists(restart_file):
             with open(restart_file, 'r') as f:
@@ -1823,6 +1942,7 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("ping", cmd_status))
     app.add_handler(CommandHandler("update", cmd_update))
+    app.add_handler(CommandHandler("version", cmd_version))
     app.add_handler(CommandHandler("help", cmd_help))
 
     # Auto-detect VPS format tanpa /start (priority rendah, jadi tidak ganggu conversation)
