@@ -149,6 +149,8 @@ Pass: Bolehtuh1
 | `/reboot` | Reboot VPS aktif | `/reboot` |
 | `/shutdown` | Shutdown VPS aktif | `/shutdown` |
 | `/status` | Cek VPS online/offline | `/status` |
+| `/update` | Tarik versi terbaru dari GitHub + restart | `/update` atau `/update force` |
+| `/version` | Cek commit bot yang sedang jalan | `/version` |
 | `/help` | Tampilkan bantuan | `/help` |
 
 ### Contoh Penggunaan SSH:
@@ -372,9 +374,31 @@ Installer akan update yang sudah ada.
 - Pastikan VPS mendukung KVM (bukan OpenVZ)
 
 ### Bagaimana update bot?
+Lewat Telegram: kirim `/update`. Cek versi yang jalan dengan `/version`.
+
+Manual:
 ```bash
 cd /opt/reinstallos && git pull && systemctl restart reinstall-bot
 ```
+
+### `/update` bilang "Tidak ada perubahan baru" padahal fitur baru belum muncul?
+Cek dulu versi yang benar-benar jalan:
+```
+/version
+```
+Kalau commit-nya sudah sama dengan GitHub, kodenya memang sudah terbaru — yang
+belum berubah biasanya **tombol di pesan lama**. Inline keyboard Telegram menempel
+pada pesan saat dikirim dan tidak ikut ter-update. Kirim `/start` untuk memuat menu baru.
+
+Kalau masih janggal, paksa update:
+```
+/update force
+```
+Ini reset paksa ke `origin/main` lalu restart service, walau terlihat sudah terbaru.
+
+Penyebab lain yang sekarang dilaporkan jelas oleh bot (dulu diam-diam dianggap
+"sudah terbaru"): `git fetch` gagal karena internet/DNS VPS, folder bot bukan clone
+git, `origin/main` tidak ada, atau file lokal termodifikasi.
 
 ---
 
