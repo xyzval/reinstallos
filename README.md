@@ -131,6 +131,8 @@ Pass: Bolehtuh1
 | VPS Info | Lihat RAM, CPU, Disk, Uptime |
 | Reboot/Shutdown | Kontrol VPS dari Telegram |
 | Status Check | Ping cek online/offline |
+| Edit Port | Tambah/aktifkan port SSH baru (port lama tetap dipertahankan) |
+| Edit Password | Ganti password root via SSH |
 | Auto-fix Password | Otomatis fix root password setelah install Linux |
 | Loading UI | Progress bar real-time saat install |
 | Keamanan | Password auto-dihapus dari chat |
