@@ -131,7 +131,8 @@ Pass: Bolehtuh1
 | VPS Info | Lihat RAM, CPU, Disk, Uptime |
 | Reboot | Restart VPS dari Telegram |
 | Status Check | Ping cek online/offline |
-| Edit Port | Tambah/aktifkan port SSH baru (port lama tetap dipertahankan) |
+| Open All Port | Buka firewall OS dengan konfirmasi 2 tahap, backup, dan verifikasi |
+| Edit Port | Tambah port SSH, pertahankan port lama, validasi, tes koneksi, dan rollback otomatis |
 | Edit Password | Ganti password root via SSH |
 | Auto-fix Password | Otomatis fix root password setelah install Linux |
 | Loading UI | Progress bar real-time saat install |

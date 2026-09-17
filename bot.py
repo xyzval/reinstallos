@@ -688,59 +688,170 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return EDIT_PORT
 
     if action == "act_openport":
+        keyboard = [
+            [InlineKeyboardButton("⚠️ Lanjut", callback_data="act_openport_confirm1")],
+            [InlineKeyboardButton("◀️ Batal", callback_data="act_back_menu")],
+        ]
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ⚠️  PERINGATAN KEAMANAN\n"
+            "─────────────────────────────\n\n"
+            f"  Target: {data['vps_ip']}\n\n"
+            "  Open All Port akan:\n"
+            "  • Menonaktifkan firewall OS\n"
+            "  • Menghapus aturan iptables/nftables\n"
+            "  • Mengizinkan semua trafik masuk/keluar\n\n"
+            "  Hanya port dengan aplikasi aktif yang dapat\n"
+            "  diakses. Firewall provider tetap berlaku.\n\n"
+            "  Lanjut ke konfirmasi berikutnya?\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return SELECT_VPS_ACTION
+
+    if action == "act_openport_confirm1":
+        keyboard = [
+            [InlineKeyboardButton("🔓 YA, BUKA SEMUA PORT", callback_data="act_openport_execute")],
+            [InlineKeyboardButton("◀️ Batal", callback_data="act_back_menu")],
+        ]
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  🚨  KONFIRMASI TERAKHIR\n"
+            "─────────────────────────────\n\n"
+            f"  VPS: {data['vps_ip']}\n\n"
+            "  Tindakan ini membuka firewall OS sepenuhnya\n"
+            "  dan dapat meningkatkan risiko serangan.\n\n"
+            "  Tekan tombol merah hanya jika benar-benar yakin.\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return SELECT_VPS_ACTION
+
+    if action == "act_openport_execute":
         await query.edit_message_text(
             "─────────────────────────────\n"
             f"  🔓  Open All Port - {data['vps_ip']}\n"
             "─────────────────────────────\n\n"
-            "  ⏳ Membuka semua port...\n"
+            "  ⏳ Backup dan membuka firewall OS...\n"
             "─────────────────────────────"
         )
-        openport_cmd = (
-            # Disable UFW
-            "ufw disable 2>/dev/null; "
-            # Disable firewalld
-            "systemctl stop firewalld 2>/dev/null; systemctl disable firewalld 2>/dev/null; "
-            # Flush iptables
-            "iptables -F 2>/dev/null; iptables -X 2>/dev/null; "
-            "iptables -P INPUT ACCEPT 2>/dev/null; "
-            "iptables -P FORWARD ACCEPT 2>/dev/null; "
-            "iptables -P OUTPUT ACCEPT 2>/dev/null; "
-            # Flush ip6tables
-            "ip6tables -F 2>/dev/null; ip6tables -X 2>/dev/null; "
-            "ip6tables -P INPUT ACCEPT 2>/dev/null; "
-            "ip6tables -P FORWARD ACCEPT 2>/dev/null; "
-            "ip6tables -P OUTPUT ACCEPT 2>/dev/null; "
-            # Flush nftables
-            "nft flush ruleset 2>/dev/null; "
-            # Save iptables agar persist setelah reboot
-            "netfilter-persistent save 2>/dev/null; "
-            "iptables-save > /etc/iptables.rules 2>/dev/null; "
-            "echo 'OPENPORT_DONE'"
-        )
+        openport_cmd = r'''
+set -u
+if [ "$(id -u)" -ne 0 ]; then
+    echo "OPENPORT_ERROR: membutuhkan akses root"
+    exit 1
+fi
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP_DIR="/var/backups/reinstallos/firewall-$STAMP"
+mkdir -p "$BACKUP_DIR" || {
+    echo "OPENPORT_ERROR: gagal membuat backup"
+    exit 1
+}
+
+# Backup kondisi dan aturan sebelum perubahan.
+(ufw status verbose 2>/dev/null || true) > "$BACKUP_DIR/ufw-status.txt"
+(iptables-save 2>/dev/null || true) > "$BACKUP_DIR/iptables-v4.rules"
+(ip6tables-save 2>/dev/null || true) > "$BACKUP_DIR/iptables-v6.rules"
+(nft list ruleset 2>/dev/null || true) > "$BACKUP_DIR/nftables.rules"
+(firewall-cmd --list-all-zones 2>/dev/null || true) > "$BACKUP_DIR/firewalld-zones.txt"
+(systemctl is-enabled ufw firewalld nftables netfilter-persistent 2>/dev/null || true) > "$BACKUP_DIR/service-enabled.txt"
+
+FAILURES=""
+WARNINGS=""
+failed() { FAILURES="$FAILURES $1"; }
+warned() { WARNINGS="$WARNINGS $1"; }
+
+# Nonaktifkan frontend firewall yang umum dan cegah aktif kembali setelah reboot.
+if command -v ufw >/dev/null 2>&1; then
+    ufw --force disable >/dev/null 2>&1 || failed "ufw"
+fi
+if systemctl list-unit-files firewalld.service --no-legend 2>/dev/null | grep -q firewalld; then
+    systemctl disable --now firewalld >/dev/null 2>&1 || failed "firewalld"
+fi
+if systemctl list-unit-files nftables.service --no-legend 2>/dev/null | grep -q nftables; then
+    systemctl disable --now nftables >/dev/null 2>&1 || failed "nftables-service"
+fi
+
+# Bersihkan ruleset native terlebih dahulu, kemudian pastikan policy legacy ACCEPT.
+if command -v nft >/dev/null 2>&1; then
+    nft flush ruleset >/dev/null 2>&1 || failed "nft-flush"
+fi
+if command -v iptables >/dev/null 2>&1; then
+    iptables -w 5 -F >/dev/null 2>&1 || failed "iptables-flush"
+    iptables -w 5 -X >/dev/null 2>&1 || true
+    iptables -w 5 -P INPUT ACCEPT >/dev/null 2>&1 || failed "iptables-input"
+    iptables -w 5 -P FORWARD ACCEPT >/dev/null 2>&1 || failed "iptables-forward"
+    iptables -w 5 -P OUTPUT ACCEPT >/dev/null 2>&1 || failed "iptables-output"
+fi
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -w 5 -F >/dev/null 2>&1 || failed "ip6tables-flush"
+    ip6tables -w 5 -X >/dev/null 2>&1 || true
+    ip6tables -w 5 -P INPUT ACCEPT >/dev/null 2>&1 || failed "ip6tables-input"
+    ip6tables -w 5 -P FORWARD ACCEPT >/dev/null 2>&1 || failed "ip6tables-forward"
+    ip6tables -w 5 -P OUTPUT ACCEPT >/dev/null 2>&1 || failed "ip6tables-output"
+fi
+
+# Simpan aturan kosong/ACCEPT bila persistence tersedia.
+if command -v netfilter-persistent >/dev/null 2>&1; then
+    netfilter-persistent save >/dev/null 2>&1 || warned "persistence-save"
+else
+    warned "netfilter-persistent-tidak-terpasang"
+fi
+iptables-save > /etc/iptables.rules 2>/dev/null || warned "iptables-rules-save"
+ip6tables-save > /etc/ip6tables.rules 2>/dev/null || true
+
+# Verifikasi hasil; marker sukses hanya diberikan bila tindakan penting berhasil.
+if command -v iptables >/dev/null 2>&1; then
+    iptables -S 2>/dev/null | grep -q '^-P INPUT ACCEPT$' || failed "verify-input"
+    iptables -S 2>/dev/null | grep -q '^-P FORWARD ACCEPT$' || failed "verify-forward"
+    iptables -S 2>/dev/null | grep -q '^-P OUTPUT ACCEPT$' || failed "verify-output"
+fi
+if command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -S 2>/dev/null | grep -q '^-P INPUT ACCEPT$' || failed "verify-ipv6-input"
+fi
+if command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -Eq '[[:space:]](drop|reject)([[:space:]]|$)'; then
+    failed "verify-nft-drop-rule"
+fi
+if systemctl is-active --quiet firewalld 2>/dev/null; then failed "verify-firewalld"; fi
+if ufw status 2>/dev/null | grep -qi '^Status: active'; then failed "verify-ufw"; fi
+
+printf 'BACKUP_DIR:%s\n' "$BACKUP_DIR"
+printf 'OPENPORT_WARNINGS:%s\n' "${WARNINGS:-none}"
+if [ -n "$FAILURES" ]; then
+    printf 'OPENPORT_ERROR:%s\n' "$FAILURES"
+    exit 1
+fi
+echo "OPENPORT_DONE"
+'''
         result = await ssh_exec(data, openport_cmd)
+        keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
         if "OPENPORT_DONE" in result:
-            keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
+            backup_line = next((ln for ln in result.splitlines() if ln.startswith("BACKUP_DIR:")), "BACKUP_DIR:-")
+            warning_line = next((ln for ln in result.splitlines() if ln.startswith("OPENPORT_WARNINGS:")), "OPENPORT_WARNINGS:none")
             await query.edit_message_text(
                 "─────────────────────────────\n"
-                "  ✅  All Port Opened!\n"
+                "  ✅  Firewall OS Terbuka\n"
                 "─────────────────────────────\n\n"
                 f"  🎯 {data['vps_ip']}\n\n"
-                "  ● UFW disabled\n"
-                "  ● Firewalld disabled\n"
-                "  ● iptables flushed (ACCEPT ALL)\n"
-                "  ● ip6tables flushed (ACCEPT ALL)\n"
-                "  ● nftables flushed\n\n"
-                "  Port 1-65535 TCP/UDP terbuka.\n\n"
+                "  • Firewall OS dinonaktifkan\n"
+                "  • Policy IPv4/IPv6: ACCEPT\n"
+                "  • Aturan lama sudah dibackup\n\n"
+                f"  {backup_line}\n"
+                f"  {warning_line}\n\n"
+                "  Catatan: hanya service yang listening dapat\n"
+                "  diakses dan firewall provider tetap berlaku.\n"
                 "─────────────────────────────",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
         else:
-            keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
             await query.edit_message_text(
                 "─────────────────────────────\n"
-                "  ❌  Open Port Gagal\n"
+                "  ❌  Open All Port Gagal\n"
                 "─────────────────────────────\n\n"
-                f"  {result}\n\n"
+                f"{result[:2500]}\n\n"
+                "  Tidak ada status sukses palsu. Periksa pesan\n"
+                "  error dan backup sebelum mencoba kembali.\n"
                 "─────────────────────────────",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )
@@ -852,7 +963,7 @@ async def edit_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def edit_port_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Handle port input: add a new SSH port on the server (keep existing ports)."""
+    """Add and verify a new SSH port while keeping the old port active."""
     data = context.user_data
     new_port_text = update.message.text.strip()
 
@@ -860,7 +971,8 @@ async def edit_port_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         new_port = int(new_port_text)
         if not 1 <= new_port <= 65535:
             raise ValueError
-    except (ValueError, TypeError):
+        cur_port = int(data["vps_port"])
+    except (ValueError, TypeError, KeyError):
         await update.message.reply_text(
             "❌ Port harus angka 1-65535. Contoh: `22`\n"
             "Kirim ulang atau /start untuk batal.",
@@ -868,90 +980,253 @@ async def edit_port_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         )
         return EDIT_PORT
 
-    if new_port == data.get('vps_port'):
+    if new_port == cur_port:
         await update.message.reply_text(
-            f"✅ Port `{new_port}` sudah terpakai di VPS ini.\n"
-            "Kirim port lain (contoh: `22`) atau /start.",
+            f"✅ Port `{new_port}` sudah menjadi port aktif di data bot.\n"
+            "Kirim port lain atau /start untuk batal.",
             parse_mode="Markdown",
         )
         return EDIT_PORT
 
-    cur_port = data['vps_port']
     await update.message.reply_text(
-        f"⏳ Menambahkan port {new_port} ke server {data['vps_ip']}...\n"
-        "(port lama tetap dipertahankan)"
+        f"⏳ Menambahkan port {new_port} ke {data['vps_ip']}...\n"
+        f"Port lama {cur_port} akan tetap dipertahankan."
     )
 
-    # Robust script: keep all existing active Ports + add the new one, then restart sshd
+    # Managed drop-in keeps the old/default port and every previously added port.
+    # The script validates sshd, handles Ubuntu ssh.socket, verifies both listeners,
+    # and restores the previous configuration if activation fails.
     cmd = f'''
-set -e
+set -u
+NEW_PORT={new_port}
+OLD_PORT={cur_port}
 CFG=/etc/ssh/sshd_config
-if [ ! -f "$CFG" ]; then echo "NO_CONFIG"; exit 1; fi
-# kumpulkan semua port aktif yang sudah ada (skip baris komentar)
-PORTS=$(grep -E '^[[:space:]]*Port[[:space:]]' "$CFG" | awk '{{print $2}}' || true)
-# tambahkan port baru bila belum ada
-if ! echo "$PORTS" | grep -qw {new_port}; then
-    PORTS="$PORTS {new_port}"
+DROPIN_DIR=/etc/ssh/sshd_config.d
+MANAGED="$DROPIN_DIR/99-reinstallos-ports.conf"
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "PORT_ERROR: membutuhkan akses root"
+    exit 1
 fi
-# hapus semua direktif Port (aktif & komentar) lalu tulis ulang
-sed -i '/^[[:space:]]*#\\?[[:space:]]*Port[[:space:]]/d' "$CFG"
-for p in $PORTS; do echo "Port $p" >> "$CFG"; done
-# restart sshd (maksimal 2x, tunggu antara)
-systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
+if [ ! -f "$CFG" ] || ! command -v sshd >/dev/null 2>&1; then
+    echo "PORT_ERROR: konfigurasi atau binary sshd tidak ditemukan"
+    exit 1
+fi
+
+STAMP=$(date +%Y%m%d-%H%M%S)
+BACKUP_DIR="/var/backups/reinstallos/ssh-port-$STAMP"
+mkdir -p "$BACKUP_DIR" || {{ echo "PORT_ERROR: gagal membuat backup"; exit 1; }}
+cp -a "$CFG" "$BACKUP_DIR/sshd_config"
+mkdir -p "$DROPIN_DIR"
+if [ -f "$MANAGED" ]; then
+    cp -a "$MANAGED" "$BACKUP_DIR/99-reinstallos-ports.conf"
+    echo yes > "$BACKUP_DIR/managed-existed"
+else
+    echo no > "$BACKUP_DIR/managed-existed"
+fi
+
+restore_config() {{
+    cp -a "$BACKUP_DIR/sshd_config" "$CFG"
+    if [ "$(cat "$BACKUP_DIR/managed-existed")" = yes ]; then
+        cp -a "$BACKUP_DIR/99-reinstallos-ports.conf" "$MANAGED"
+    else
+        rm -f "$MANAGED"
+    fi
+    sshd -t >/dev/null 2>&1 || true
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    if systemctl is-enabled --quiet ssh.socket 2>/dev/null || systemctl is-active --quiet ssh.socket 2>/dev/null; then
+        systemctl restart ssh.socket >/dev/null 2>&1 || true
+        systemctl restart ssh.service >/dev/null 2>&1 || true
+    else
+        systemctl reload sshd >/dev/null 2>&1 || systemctl reload ssh >/dev/null 2>&1 || \
+        service ssh reload >/dev/null 2>&1 || service sshd reload >/dev/null 2>&1 || true
+    fi
+}}
+
+# Ensure the standard drop-in directory is actually included.
+if ! grep -Eq '^[[:space:]]*Include[[:space:]].*sshd_config[.]d/[*][.]conf' "$CFG"; then
+    sed -i '1iInclude /etc/ssh/sshd_config.d/*.conf' "$CFG" || {{
+        echo "PORT_ERROR: gagal menambahkan Include sshd_config.d"
+        restore_config
+        exit 1
+    }}
+fi
+
+TMP=$(mktemp)
+if [ -f "$MANAGED" ]; then
+    cat "$MANAGED" > "$TMP"
+else
+    printf '%s\n' '# Managed by Reinstall OS Bot - keep old ports active' > "$TMP"
+fi
+
+# If the old port was implicit (default 22), make it explicit before adding another.
+EXPLICIT_PORTS=$(grep -RhsE '^[[:space:]]*Port[[:space:]]+[0-9]+' "$CFG" "$DROPIN_DIR"/*.conf 2>/dev/null | awk '{{print $2}}' | sort -nu || true)
+if [ -z "$EXPLICIT_PORTS" ] && ! grep -Eq "^[[:space:]]*Port[[:space:]]+$OLD_PORT([[:space:]]|$)" "$TMP"; then
+    echo "Port $OLD_PORT" >> "$TMP"
+fi
+if ! grep -Eq "^[[:space:]]*Port[[:space:]]+$NEW_PORT([[:space:]]|$)" "$TMP"; then
+    echo "Port $NEW_PORT" >> "$TMP"
+fi
+install -o root -g root -m 0644 "$TMP" "$MANAGED"
+rm -f "$TMP"
+
+# Validate before touching the running SSH listener.
+if ! sshd -t >/dev/null 2>&1; then
+    echo "PORT_ERROR: sshd -t gagal; konfigurasi di-rollback"
+    restore_config
+    exit 1
+fi
+EFFECTIVE=$(sshd -T 2>/dev/null | awk '$1 == "port" {{print $2}}' | sort -nu)
+if ! printf '%s\n' "$EFFECTIVE" | grep -qx "$OLD_PORT" || ! printf '%s\n' "$EFFECTIVE" | grep -qx "$NEW_PORT"; then
+    echo "PORT_ERROR: port lama/baru tidak ada di konfigurasi efektif; rollback"
+    restore_config
+    exit 1
+fi
+
+# SELinux needs an explicit ssh_port_t mapping for non-standard ports.
+if command -v getenforce >/dev/null 2>&1 && [ "$(getenforce 2>/dev/null)" = Enforcing ]; then
+    if command -v semanage >/dev/null 2>&1; then
+        semanage port -a -t ssh_port_t -p tcp "$NEW_PORT" >/dev/null 2>&1 || \
+        semanage port -m -t ssh_port_t -p tcp "$NEW_PORT" >/dev/null 2>&1 || {{
+            echo "PORT_ERROR: gagal menambahkan SELinux ssh_port_t; rollback"
+            restore_config
+            exit 1
+        }}
+    else
+        echo "PORT_ERROR: SELinux Enforcing tetapi semanage tidak tersedia; rollback"
+        restore_config
+        exit 1
+    fi
+fi
+
+# Open only the new SSH port in common host firewalls.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    ufw allow "$NEW_PORT/tcp" >/dev/null 2>&1 || {{
+        echo "PORT_ERROR: gagal membuka UFW; rollback"
+        restore_config
+        exit 1
+    }}
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --permanent --add-port="$NEW_PORT/tcp" >/dev/null 2>&1 && \
+    firewall-cmd --reload >/dev/null 2>&1 || {{
+        echo "PORT_ERROR: gagal membuka firewalld; rollback"
+        restore_config
+        exit 1
+    }}
+fi
+if command -v iptables >/dev/null 2>&1 && iptables -S INPUT 2>/dev/null | grep -Eq '(^-P INPUT DROP$|-j (DROP|REJECT))'; then
+    iptables -C INPUT -p tcp --dport "$NEW_PORT" -j ACCEPT >/dev/null 2>&1 || \
+    iptables -I INPUT 1 -p tcp --dport "$NEW_PORT" -j ACCEPT >/dev/null 2>&1 || true
+fi
+if command -v ip6tables >/dev/null 2>&1 && ip6tables -S INPUT 2>/dev/null | grep -Eq '(^-P INPUT DROP$|-j (DROP|REJECT))'; then
+    ip6tables -C INPUT -p tcp --dport "$NEW_PORT" -j ACCEPT >/dev/null 2>&1 || \
+    ip6tables -I INPUT 1 -p tcp --dport "$NEW_PORT" -j ACCEPT >/dev/null 2>&1 || true
+fi
+
+# Activate configuration for both classic ssh.service and socket-activated SSH.
+ACTIVATE_OK=0
+if systemctl is-enabled --quiet ssh.socket 2>/dev/null || systemctl is-active --quiet ssh.socket 2>/dev/null; then
+    systemctl daemon-reload >/dev/null 2>&1 && \
+    systemctl restart ssh.socket >/dev/null 2>&1 && \
+    systemctl restart ssh.service >/dev/null 2>&1 && ACTIVATE_OK=1
+else
+    systemctl reload sshd >/dev/null 2>&1 && ACTIVATE_OK=1 || \
+    systemctl reload ssh >/dev/null 2>&1 && ACTIVATE_OK=1 || \
+    service ssh reload >/dev/null 2>&1 && ACTIVATE_OK=1 || \
+    service sshd reload >/dev/null 2>&1 && ACTIVATE_OK=1
+fi
+if [ "$ACTIVATE_OK" -ne 1 ]; then
+    echo "PORT_ERROR: gagal mengaktifkan SSH; konfigurasi di-rollback"
+    restore_config
+    exit 1
+fi
 sleep 2
-echo "PORTS_NOW: $(grep -E '^[[:space:]]*Port[[:space:]]' "$CFG" | awk '{{print $2}}' | tr '\\n' ' ')"
-echo "PORT_DONE"
+
+is_listening() {{
+    ss -H -ltn 2>/dev/null | awk '{{print $4}}' | grep -Eq ":$1$"
+}}
+if ! is_listening "$OLD_PORT"; then
+    echo "PORT_ERROR: port lama berhenti listening; rollback darurat"
+    restore_config
+    exit 1
+fi
+if ! is_listening "$NEW_PORT"; then
+    echo "PORT_ERROR: port baru belum listening; konfigurasi di-rollback"
+    restore_config
+    exit 1
+fi
+
+printf 'BACKUP_DIR:%s\n' "$BACKUP_DIR"
+printf 'PORTS_NOW:%s\n' "$(sshd -T 2>/dev/null | awk '$1 == "port" {{print $2}}' | sort -nu | tr '\n' ' ')"
+echo "PORT_CONFIGURED"
 '''
     result = await ssh_exec(data, cmd)
+    keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
 
-    if "PORT_DONE" in result:
-        # Verify new port is actually reachable
-        test_data = dict(data)
-        test_data["vps_port"] = new_port
-        test = await ssh_exec(test_data, "echo OK")
-        test_ok = "OK" in test
-
-        # Update stored VPS port to the new one (both ports remain active on server)
-        old_port = cur_port
-        data['vps_port'] = new_port
-        context.user_data['vps_port'] = new_port
-
-        user_id = update.effective_user.id
-        vps_list = load_vps_list(user_id)
-        for v in vps_list:
-            if v['vps_ip'] == data['vps_ip'] and v['vps_port'] == old_port:
-                v['vps_port'] = new_port
-                break
-        save_vps_list(user_id, vps_list)
-
-        ports_line = next((ln for ln in result.splitlines() if "PORTS_NOW:" in ln), "")
-        status = "✅ Koneksi ke port baru OK" if test_ok else f"⚠️ Port baru belum bisa dihubungi: {test[:80]}"
-
-        keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
+    if "PORT_CONFIGURED" not in result:
         await update.message.reply_text(
             "─────────────────────────────\n"
-            "  ✅  Port Ditambahkan!\n"
+            "  ❌  Gagal Menambahkan Port\n"
             "─────────────────────────────\n\n"
-            f"  🎯 {data['vps_ip']}\n"
-            f"  {ports_line}\n\n"
-            f"  {status}\n\n"
-            "  Port lama & baru sama-sama aktif di server.\n"
-            "  Data bot diupdate ke port baru.\n\n"
+            f"{result[:2500]}\n\n"
+            f"  Data bot tetap memakai port {cur_port}.\n"
+            "  Konfigurasi otomatis di-rollback jika aktivasi gagal.\n"
             "─────────────────────────────",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
-    else:
-        keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
+        return SELECT_VPS_ACTION
+
+    # Verify from the bot host, not only from inside the target VPS.
+    test_data = dict(data)
+    test_data["vps_port"] = new_port
+    test = await ssh_exec(test_data, "printf REINSTALLOS_PORT_TEST_OK")
+    test_ok = "REINSTALLOS_PORT_TEST_OK" in test
+    ports_line = next((ln for ln in result.splitlines() if ln.startswith("PORTS_NOW:")), "PORTS_NOW:-")
+    backup_line = next((ln for ln in result.splitlines() if ln.startswith("BACKUP_DIR:")), "BACKUP_DIR:-")
+
+    if not test_ok:
         await update.message.reply_text(
             "─────────────────────────────\n"
-            "  ❌  Gagal Edit Port\n"
+            "  ⚠️  Port Baru Belum Bisa Diakses\n"
             "─────────────────────────────\n\n"
-            f"  {result}\n\n"
-            "  Periksa apakah port lama masih bisa akses.\n\n"
+            f"  🎯 {data['vps_ip']}:{new_port}\n"
+            f"  {ports_line}\n"
+            f"  {backup_line}\n\n"
+            "  SSH sudah listening secara lokal, tetapi koneksi\n"
+            "  dari server bot gagal. Periksa firewall provider.\n\n"
+            f"  Data bot tetap memakai port lama {cur_port}.\n"
             "─────────────────────────────",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
+        return SELECT_VPS_ACTION
 
+    # Only switch bot data after a real connection to the new port succeeds.
+    old_port = cur_port
+    data["vps_port"] = new_port
+    context.user_data["vps_port"] = new_port
+
+    user_id = update.effective_user.id
+    vps_list = load_vps_list(user_id)
+    for v in vps_list:
+        if v["vps_ip"] == data["vps_ip"] and int(v["vps_port"]) == old_port:
+            v["vps_port"] = new_port
+            break
+    save_vps_list(user_id, vps_list)
+
+    await update.message.reply_text(
+        "─────────────────────────────\n"
+        "  ✅  Port SSH Ditambahkan\n"
+        "─────────────────────────────\n\n"
+        f"  🎯 {data['vps_ip']}\n"
+        f"  {ports_line}\n"
+        f"  ✅ Koneksi ke port {new_port} berhasil\n"
+        f"  ✅ Port lama {old_port} tetap aktif\n"
+        f"  {backup_line}\n\n"
+        "  Data bot sekarang memakai port baru.\n"
+        "─────────────────────────────",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
     return SELECT_VPS_ACTION
 
 
