@@ -62,6 +62,8 @@ echo -e "${GREEN}[4/6] Membuat konfigurasi...${NC}"
 cat > /opt/reinstallos/.env << EOF
 BOT_TOKEN=${BOT_TOKEN}
 OWNER_ID=${OWNER_ID}
+MAX_ACTIVE_REINSTALL_JOBS=4
+MAX_ACTIVE_REINSTALL_JOBS_PER_USER=3
 EOF
 chmod 600 /opt/reinstallos/.env
 

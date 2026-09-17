@@ -4,5 +4,6 @@ __pycache__/
 venv/
 vps_data.json
 authorized_users.json
+reinstall_jobs.json
 .restart_notify
 *.tmp.*

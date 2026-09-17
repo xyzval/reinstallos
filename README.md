@@ -101,8 +101,9 @@ Setelah itu bot langsung jalan! ✅
 4. Pilih versi OS yang diinginkan
 5. Pilih bahasa (untuk Windows)
 6. Klik **✅ YA, INSTALL!** untuk konfirmasi
-7. Tunggu 15-30 menit ☕
-8. Bot akan kasih notifikasi saat selesai + info login
+7. Bot membuat background job dan langsung mengembalikan kontrol; Anda boleh memilih VPS lain dan memulai reinstall berikutnya
+8. Pantau semua progress dari tombol **📋 Reinstall Jobs** atau perintah `/jobs`
+9. Bot akan memberi notifikasi saat job selesai atau gagal
 
 ### Step 6: Login ke VPS Setelah Reinstall
 
@@ -116,7 +117,7 @@ Pass: Teddysun.com
 **Linux:**
 ```
 Host: ssh root@IP_VPS
-Pass: Bolehtuh1
+Pass: Digicore@1
 ```
 
 ---
@@ -129,6 +130,7 @@ Pass: Bolehtuh1
 | Owner & User | Owner menambah, menonaktifkan, dan mencabut akses user |
 | Masa Berlaku User | Pilihan 1/7/30 hari, manual 1–3650 hari, atau permanen; akses otomatis ditolak saat kedaluwarsa |
 | Reinstall OS | Windows & Linux, pilih dari menu |
+| Background Reinstall Jobs | Reinstall VPS berbeda berjalan bersamaan, persisten setelah restart bot, dengan `/jobs` untuk progress |
 | SSH Command | Kirim command langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime |
 | Reboot | Restart VPS dari Telegram |
@@ -154,6 +156,7 @@ Pass: Bolehtuh1
 - User tidak dapat melihat atau mengendalikan VPS milik user lain maupun milik owner.
 - Owner dapat menonaktifkan atau mencabut akses tanpa menghapus data VPS user.
 - Semua command, pesan, dan callback melewati pemeriksaan izin di sisi server.
+- Daftar dan detail reinstall job juga dipisahkan berdasarkan Telegram User ID; user tidak dapat membuka job milik user lain.
 
 Alur owner:
 
@@ -176,6 +179,7 @@ User yang belum mendapat akses akan melihat Telegram ID miliknya untuk dikirim k
 | Perintah | Fungsi | Contoh |
 |---|---|---|
 | `/start` | Buka menu VPS | `/start` |
+| `/jobs` | Daftar dan progress reinstall job milik sendiri | `/jobs` |
 | `/info` | Info sistem VPS aktif | `/info` |
 | `/ssh CMD` | Jalankan command SSH | `/ssh uptime` |
 | `/reboot` | Reboot VPS aktif | `/reboot` |
@@ -214,7 +218,7 @@ User yang belum mendapat akses akan melihat Telegram ID miliknya untuk dikirim k
    cp .env.example .env
    nano .env
    ```
-   Isi `BOT_TOKEN` dengan token dari BotFather.
+   Isi `BOT_TOKEN` dengan token dari BotFather. Batas concurrency opsional dapat diatur dengan `MAX_ACTIVE_REINSTALL_JOBS` (default 4) dan `MAX_ACTIVE_REINSTALL_JOBS_PER_USER` (default 3).
 
 5. Jalankan bot:
    ```bash
@@ -257,10 +261,10 @@ Pilih nomor OS dari menu, selesai!
 
 | OS | Login Default |
 |---|---|
-| Debian 9, 10, 11, 12 | root / Bolehtuh1 |
-| Ubuntu 20.04, 22.04 | root / Bolehtuh1 |
-| CentOS 9 Stream | root / Bolehtuh1 |
-| AlmaLinux 9 | root / Bolehtuh1 |
+| Debian 9, 10, 11, 12 | root / Digicore@1 |
+| Ubuntu 20.04, 22.04 | root / Digicore@1 |
+| CentOS 9 Stream | root / Digicore@1 |
+| AlmaLinux 9 | root / Digicore@1 |
 
 **Login via SSH port 22**
 
@@ -331,7 +335,10 @@ systemctl daemon-reload
 - Set `OWNER_ID` di `.env`; user lain hanya dapat ditambahkan oleh owner melalui bot
 - Password VPS otomatis dihapus dari chat setelah dikirim
 - Jangan share bot token ke siapapun
-- File `.env`, `authorized_users.json`, dan `vps_data.json` hanya bisa dibaca root (permission 600)
+- File `.env`, `authorized_users.json`, `vps_data.json`, dan `reinstall_jobs.json` hanya bisa dibaca root (permission 600)
+- `reinstall_jobs.json` hanya menyimpan metadata non-rahasia; password VPS tetap diambil dari bucket VPS milik user saat dibutuhkan
+- Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
+- Installer target dijalankan detached. Setelah installer dimulai tidak ada tombol cancel yang mengklaim dapat membatalkan reinstall dengan aman
 - Gunakan VPS terpisah untuk menjalankan bot (jangan di VPS yang sama yang mau di-reinstall)
 
 ---

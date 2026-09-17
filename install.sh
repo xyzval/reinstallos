@@ -169,6 +169,8 @@ create_env() {
     cat > "$INSTALL_DIR/.env" << EOF
 BOT_TOKEN=${BOT_TOKEN}
 OWNER_ID=${OWNER_ID}
+MAX_ACTIVE_REINSTALL_JOBS=4
+MAX_ACTIVE_REINSTALL_JOBS_PER_USER=3
 EOF
     chmod 600 "$INSTALL_DIR/.env"
     print_step "Konfigurasi tersimpan"
