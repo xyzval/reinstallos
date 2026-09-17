@@ -63,8 +63,8 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "reinstall-bot")
 (
     ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD,
     EDIT_PASS, WIZ_IP, WIZ_PORT, WIZ_USER, WIZ_PASS, EDIT_PORT,
-    OWNER_ADD_USER, OWNER_SELECT_EXPIRY,
-) = range(14)
+    OWNER_ADD_USER, OWNER_SELECT_EXPIRY, OWNER_CUSTOM_EXPIRY,
+) = range(15)
 
 
 # OS Options
@@ -441,6 +441,7 @@ def get_expiry_selection_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("30 Hari", callback_data="owner_expiry_30"),
             InlineKeyboardButton("♾ Permanen", callback_data="owner_expiry_perm"),
         ],
+        [InlineKeyboardButton("✏️ Manual (hari)", callback_data="owner_expiry_custom")],
         [InlineKeyboardButton("◀️ Batal", callback_data="owner_users")],
     ])
 
@@ -453,6 +454,7 @@ def get_owner_user_detail_keyboard(user_id: str, record: dict) -> InlineKeyboard
             InlineKeyboardButton("+7 Hari", callback_data=f"owner_extend_7_{user_id}"),
             InlineKeyboardButton("+30 Hari", callback_data=f"owner_extend_30_{user_id}"),
         ],
+        [InlineKeyboardButton("✏️ Tambah Hari Manual", callback_data=f"owner_extend_custom_{user_id}")],
         [InlineKeyboardButton("♾ Jadikan Permanen", callback_data=f"owner_permanent_{user_id}")],
         [InlineKeyboardButton(toggle_label, callback_data=f"owner_toggle_{user_id}")],
         [InlineKeyboardButton("🗑 Cabut Akses", callback_data=f"owner_delete_{user_id}")],
@@ -503,6 +505,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if action in ("owner_users", "owner_list"):
         context.user_data.pop("pending_auth_user", None)
+        context.user_data.pop("pending_custom_expiry", None)
         await query.edit_message_text(
             get_owner_users_text(),
             reply_markup=get_owner_users_keyboard(),
@@ -526,6 +529,31 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return OWNER_ADD_USER
 
+    if action == "owner_expiry_custom":
+        pending = context.user_data.get("pending_auth_user")
+        if not pending:
+            await query.edit_message_text(
+                "Sesi tambah user sudah berakhir. Silakan mulai kembali.",
+                reply_markup=get_owner_users_keyboard(),
+            )
+            return SELECT_VPS_ACTION
+        context.user_data["pending_custom_expiry"] = {"mode": "add"}
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ✏️  Masa Berlaku Manual\n"
+            "─────────────────────────────\n\n"
+            f"  User: {pending['name']}\n"
+            f"  Telegram ID: {pending['user_id']}\n\n"
+            "  Kirim jumlah hari antara 1–3650.\n"
+            "  Contoh: `14`, `45`, atau `365`\n"
+            "─────────────────────────────",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Batal", callback_data="owner_users")
+            ]]),
+        )
+        return OWNER_CUSTOM_EXPIRY
+
     if action.startswith("owner_expiry_"):
         pending = context.user_data.get("pending_auth_user")
         if not pending:
@@ -546,6 +574,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             pending["user_id"], pending["name"], active=True, expires_at=expires_at
         )
         context.user_data.pop("pending_auth_user", None)
+        context.user_data.pop("pending_custom_expiry", None)
         record = load_authorized_users()[pending["user_id"]]
         await query.edit_message_text(
             "─────────────────────────────\n"
@@ -563,6 +592,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return SELECT_VPS_ACTION
 
     if action.startswith("owner_detail_"):
+        context.user_data.pop("pending_custom_expiry", None)
         target_id = action.split("owner_detail_", 1)[1]
         record = load_authorized_users().get(target_id)
         if not record:
@@ -582,6 +612,32 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=get_owner_user_detail_keyboard(target_id, record),
         )
         return SELECT_VPS_ACTION
+
+    if action.startswith("owner_extend_custom_"):
+        target_id = action.split("owner_extend_custom_", 1)[1]
+        record = load_authorized_users().get(target_id)
+        if not record:
+            await query.edit_message_text("User tidak ditemukan.", reply_markup=get_owner_users_keyboard())
+            return SELECT_VPS_ACTION
+        context.user_data["pending_custom_expiry"] = {
+            "mode": "extend",
+            "user_id": target_id,
+        }
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ✏️  Perpanjangan Manual\n"
+            "─────────────────────────────\n\n"
+            f"  User: {record.get('name') or target_id}\n"
+            f"  Berlaku sampai: {format_expiry(record)}\n\n"
+            "  Kirim tambahan hari antara 1–3650.\n"
+            "  Contoh: `14`, `45`, atau `365`\n"
+            "─────────────────────────────",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Batal", callback_data=f"owner_detail_{target_id}")
+            ]]),
+        )
+        return OWNER_CUSTOM_EXPIRY
 
     if action.startswith("owner_extend_"):
         match = re.fullmatch(r"owner_extend_(1|7|30)_([0-9]+)", action)
@@ -635,6 +691,8 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return SELECT_VPS_ACTION
 
     if action == "owner_back":
+        context.user_data.pop("pending_auth_user", None)
+        context.user_data.pop("pending_custom_expiry", None)
         vps_list = load_vps_list(user_id)
         status = "Pilih VPS atau tambah baru:" if vps_list else "Belum ada VPS. Tambahkan VPS baru:"
         await query.edit_message_text(
@@ -755,6 +813,96 @@ async def owner_add_user_handler(update: Update, context: ContextTypes.DEFAULT_T
         reply_markup=get_expiry_selection_keyboard(),
     )
     return OWNER_SELECT_EXPIRY
+
+
+async def owner_custom_expiry_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Apply a custom 1-3650 day validity or extension selected by the owner."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("Fitur ini hanya untuk owner.")
+        return ConversationHandler.END
+
+    raw = update.message.text.strip()
+    try:
+        days = int(raw)
+        if not 1 <= days <= 3650:
+            raise ValueError
+    except (TypeError, ValueError):
+        await update.message.reply_text(
+            "❌ Jumlah hari harus berupa angka antara 1–3650.\n\n"
+            "Contoh: `14`, `45`, atau `365`\n"
+            "Kirim ulang atau tekan /start untuk batal.",
+            parse_mode="Markdown",
+        )
+        return OWNER_CUSTOM_EXPIRY
+
+    operation = context.user_data.get("pending_custom_expiry", {})
+    mode = operation.get("mode")
+
+    if mode == "add":
+        pending = context.user_data.get("pending_auth_user")
+        if not pending:
+            await update.message.reply_text(
+                "Sesi tambah user sudah berakhir. Silakan mulai kembali.",
+                reply_markup=get_owner_users_keyboard(),
+            )
+            return SELECT_VPS_ACTION
+        expires_at = int(_time.time()) + days * 86400
+        set_authorized_user(
+            pending["user_id"], pending["name"], active=True, expires_at=expires_at
+        )
+        record = load_authorized_users()[pending["user_id"]]
+        context.user_data.pop("pending_auth_user", None)
+        context.user_data.pop("pending_custom_expiry", None)
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ✅  User Ditambahkan\n"
+            "─────────────────────────────\n\n"
+            f"  Nama: {pending['name']}\n"
+            f"  Telegram ID: {pending['user_id']}\n"
+            f"  Masa berlaku: {days} hari\n"
+            f"  Berlaku sampai: {format_expiry(record)}\n"
+            "  Status: aktif\n\n"
+            "  Saat kedaluwarsa seluruh akses otomatis ditolak.\n"
+            "─────────────────────────────",
+            reply_markup=get_owner_users_keyboard(),
+        )
+        return SELECT_VPS_ACTION
+
+    if mode == "extend":
+        target_id = str(operation.get("user_id", ""))
+        users = load_authorized_users()
+        record = users.get(target_id)
+        if not record:
+            context.user_data.pop("pending_custom_expiry", None)
+            await update.message.reply_text(
+                "User tidak ditemukan.",
+                reply_markup=get_owner_users_keyboard(),
+            )
+            return SELECT_VPS_ACTION
+        base = max(int(_time.time()), int(record.get("expires_at") or 0))
+        record["expires_at"] = base + days * 86400
+        record["active"] = True
+        users[target_id] = record
+        save_authorized_users(users)
+        context.user_data.pop("pending_custom_expiry", None)
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  ✅  Masa Berlaku Diperpanjang\n"
+            "─────────────────────────────\n\n"
+            f"  User: {record.get('name') or target_id}\n"
+            f"  Tambahan: {days} hari\n"
+            f"  Berlaku sampai: {format_expiry(record)}\n"
+            "  Status: aktif\n"
+            "─────────────────────────────",
+            reply_markup=get_owner_user_detail_keyboard(target_id, record),
+        )
+        return SELECT_VPS_ACTION
+
+    await update.message.reply_text(
+        "Sesi masa berlaku sudah berakhir. Silakan mulai kembali.",
+        reply_markup=get_owner_users_keyboard(),
+    )
+    return SELECT_VPS_ACTION
 
 
 # ============ Handlers ============
@@ -2739,6 +2887,10 @@ def main() -> None:
                 CallbackQueryHandler(owner_callback, pattern="^owner_"),
             ],
             OWNER_SELECT_EXPIRY: [
+                CallbackQueryHandler(owner_callback, pattern="^owner_"),
+            ],
+            OWNER_CUSTOM_EXPIRY: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, owner_custom_expiry_handler),
                 CallbackQueryHandler(owner_callback, pattern="^owner_"),
             ],
         },

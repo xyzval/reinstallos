@@ -127,7 +127,7 @@ Pass: Bolehtuh1
 |---|---|
 | Multi-VPS per User | Setiap user hanya melihat dan mengelola VPS miliknya sendiri |
 | Owner & User | Owner menambah, menonaktifkan, dan mencabut akses user |
-| Masa Berlaku User | Pilihan 1/7/30 hari atau permanen; akses otomatis ditolak saat kedaluwarsa |
+| Masa Berlaku User | Pilihan 1/7/30 hari, manual 1–3650 hari, atau permanen; akses otomatis ditolak saat kedaluwarsa |
 | Reinstall OS | Windows & Linux, pilih dari menu |
 | SSH Command | Kirim command langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime |
@@ -147,9 +147,9 @@ Pass: Bolehtuh1
 - `OWNER_ID` disimpan di `.env` dan memiliki akses owner permanen.
 - Tombol **👥 Kelola User** hanya muncul kepada owner.
 - Owner dapat menambah user menggunakan Telegram User ID dan nama opsional.
-- Saat menambah user, owner memilih masa berlaku 1 hari, 7 hari, 30 hari, atau permanen.
+- Saat menambah user, owner memilih masa berlaku 1 hari, 7 hari, 30 hari, manual 1–3650 hari, atau permanen.
 - Setelah kedaluwarsa, seluruh command, pesan, dan tombol user otomatis ditolak.
-- Owner dapat melihat detail, memperpanjang masa berlaku, atau menjadikan akses permanen.
+- Owner dapat melihat detail, memperpanjang dengan preset/manual, atau menjadikan akses permanen.
 - User aktif dapat menambah VPS sendiri; daftar VPS dipisahkan berdasarkan Telegram User ID.
 - User tidak dapat melihat atau mengendalikan VPS milik user lain maupun milik owner.
 - Owner dapat menonaktifkan atau mencabut akses tanpa menghapus data VPS user.
