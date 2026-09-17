@@ -5,7 +5,7 @@ by xyzval
 
 Features:
 - Multi-VPS management (save multiple VPS)
-- Inline button menu (reinstall, info, reboot, shutdown, ssh)
+- Inline button menu (reinstall, info, reboot, ssh)
 - Professional loading UI
 - Auto-fix Linux password after install
 """
@@ -157,7 +157,6 @@ def get_action_keyboard():
         [
             InlineKeyboardButton("📊 Info", callback_data="act_info"),
             InlineKeyboardButton("🔄 Reboot", callback_data="act_reboot"),
-            InlineKeyboardButton("⏹ Shutdown", callback_data="act_shutdown"),
         ],
         [
             InlineKeyboardButton("💻 SSH Command", callback_data="act_ssh"),
@@ -631,19 +630,6 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             f"  🎯 {data['vps_ip']}\n"
             "  Status: Reboot sent!\n"
             "  Online dalam 1-3 menit.\n\n"
-            "─────────────────────────────",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]),
-        )
-        return SELECT_VPS_ACTION
-
-    if action == "act_shutdown":
-        result = await ssh_exec(data, "shutdown -h now")
-        await query.edit_message_text(
-            "─────────────────────────────\n"
-            "  ⏹️  VPS Shutting Down\n"
-            "─────────────────────────────\n\n"
-            f"  🎯 {data['vps_ip']}\n"
-            "  Status: Shutdown sent!\n\n"
             "─────────────────────────────",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]),
         )
@@ -1479,18 +1465,6 @@ async def cmd_reboot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"🔄 Reboot sent ke {data['vps_ip']}")
 
 
-async def cmd_shutdown(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Standalone /shutdown command."""
-    if not is_authorized(update.effective_user.id):
-        return
-    data = context.user_data
-    if not data.get("vps_ip"):
-        await update.message.reply_text("Gunakan /start untuk pilih VPS dulu.")
-        return
-    await ssh_exec(data, "shutdown -h now")
-    await update.message.reply_text(f"⏹ Shutdown sent ke {data['vps_ip']}")
-
-
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Standalone /ping & /status command - bisa langsung /ping <ip> tanpa login."""
     if not is_authorized(update.effective_user.id):
@@ -1813,7 +1787,6 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /info     - Info VPS\n"
         "  /ssh CMD  - SSH command\n"
         "  /reboot   - Reboot VPS\n"
-        "  /shutdown - Shutdown VPS\n"
         "  /ping     - Cek online (alias /status)\n"
         "  /update   - Update bot dari GitHub\n"
         "  /version  - Cek versi bot yang jalan\n"
@@ -1844,7 +1817,6 @@ async def post_init(application):
         BotCommand("info", "Info VPS"),
         BotCommand("ssh", "SSH command"),
         BotCommand("reboot", "Reboot VPS"),
-        BotCommand("shutdown", "Shutdown VPS"),
         BotCommand("ping", "Cek online/offline"),
         BotCommand("update", "Update bot dari GitHub"),
         BotCommand("version", "Cek versi bot yang jalan"),
@@ -1938,7 +1910,6 @@ def main() -> None:
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("ssh", cmd_ssh))
     app.add_handler(CommandHandler("reboot", cmd_reboot))
-    app.add_handler(CommandHandler("shutdown", cmd_shutdown))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("ping", cmd_status))
     app.add_handler(CommandHandler("update", cmd_update))

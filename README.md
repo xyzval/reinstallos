@@ -129,7 +129,7 @@ Pass: Bolehtuh1
 | Reinstall OS | Windows & Linux, pilih dari menu |
 | SSH Command | Kirim command langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime |
-| Reboot/Shutdown | Kontrol VPS dari Telegram |
+| Reboot | Restart VPS dari Telegram |
 | Status Check | Ping cek online/offline |
 | Edit Port | Tambah/aktifkan port SSH baru (port lama tetap dipertahankan) |
 | Edit Password | Ganti password root via SSH |
@@ -147,7 +147,6 @@ Pass: Bolehtuh1
 | `/info` | Info sistem VPS aktif | `/info` |
 | `/ssh CMD` | Jalankan command SSH | `/ssh uptime` |
 | `/reboot` | Reboot VPS aktif | `/reboot` |
-| `/shutdown` | Shutdown VPS aktif | `/shutdown` |
 | `/status` | Cek VPS online/offline | `/status` |
 | `/update` | Tarik versi terbaru dari GitHub + restart | `/update` atau `/update force` |
 | `/version` | Cek commit bot yang sedang jalan | `/version` |
