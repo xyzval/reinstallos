@@ -63,6 +63,7 @@ RESTART_NOTIFY_FILE = os.path.join(BASE_DIR, ".restart_notify")
 SERVICE_NAME = os.getenv("SERVICE_NAME", "reinstall-bot")
 MAX_ACTIVE_REINSTALL_JOBS = max(1, int(os.getenv("MAX_ACTIVE_REINSTALL_JOBS", "4")))
 MAX_ACTIVE_REINSTALL_JOBS_PER_USER = max(1, int(os.getenv("MAX_ACTIVE_REINSTALL_JOBS_PER_USER", "3")))
+MAX_QUEUED_REINSTALL_JOBS = max(1, int(os.getenv("MAX_QUEUED_REINSTALL_JOBS", "20")))
 
 # Conversation states
 (
@@ -394,10 +395,11 @@ def get_bulk_example_text():
 
 # ============ Persistent Reinstall Jobs ============
 
-ACTIVE_JOB_STATES = {"queued", "connecting", "downloading", "launching", "monitoring"}
+RUNNING_JOB_STATES = {"connecting", "downloading", "launching", "monitoring"}
+ACTIVE_JOB_STATES = {"queued", *RUNNING_JOB_STATES}
 TERMINAL_JOB_STATES = {"completed", "failed", "timeout"}
 JOB_STATUS_LABELS = {
-    "queued": "⏳ Menunggu",
+    "queued": "⏳ Antrean",
     "connecting": "🔌 Menghubungkan",
     "downloading": "⬇️ Mengunduh installer",
     "launching": "🚀 Menjalankan installer",
@@ -463,6 +465,8 @@ def create_reinstall_job(user_id: int, chat_id: int, message_id: int, data: dict
         "started_at": 0,
         "updated_at": now,
         "completed_at": 0,
+        "target_online_since": 0,
+        "verification": "",
         "error": "",
     }
     jobs[job_id] = job
@@ -502,6 +506,34 @@ def active_reinstall_jobs(user_id=None) -> list:
     return jobs
 
 
+def running_reinstall_jobs(user_id=None) -> list:
+    jobs = [
+        job for job in load_reinstall_jobs().values()
+        if job.get("status") in RUNNING_JOB_STATES
+    ]
+    if user_id is not None:
+        jobs = [job for job in jobs if str(job.get("user_id")) == str(user_id)]
+    return jobs
+
+
+def queued_reinstall_jobs(user_id=None) -> list:
+    jobs = [
+        job for job in load_reinstall_jobs().values()
+        if job.get("status") == "queued"
+    ]
+    if user_id is not None:
+        jobs = [job for job in jobs if str(job.get("user_id")) == str(user_id)]
+    jobs.sort(key=lambda job: int(job.get("created_at", 0)))
+    return jobs
+
+
+def get_queue_position(job_id: str) -> int:
+    for position, job in enumerate(queued_reinstall_jobs(), start=1):
+        if job.get("job_id") == job_id:
+            return position
+    return 0
+
+
 def find_active_job_for_vps(vps_ip: str):
     for job in active_reinstall_jobs():
         if job.get("vps_ip") == vps_ip:
@@ -538,13 +570,15 @@ def format_job_time(timestamp: int) -> str:
 
 def get_jobs_text(user_id: int) -> str:
     jobs = get_user_reinstall_jobs(user_id)
-    active = len(active_reinstall_jobs(user_id))
+    running = len(running_reinstall_jobs(user_id))
+    queued = len(queued_reinstall_jobs(user_id))
     lines = [
         "─────────────────────────────",
         "  📋  Reinstall Jobs",
         "─────────────────────────────",
         "",
-        f"  Aktif: {active}",
+        f"  Berjalan: {running}",
+        f"  Antrean: {queued}",
         f"  Riwayat ditampilkan: {len(jobs)}",
         "",
     ]
@@ -560,6 +594,8 @@ def get_jobs_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = []
     for job in get_user_reinstall_jobs(user_id, limit=10):
         status = JOB_STATUS_LABELS.get(job.get("status"), job.get("status", "?"))
+        if job.get("status") == "queued":
+            status += f" #{get_queue_position(job['job_id'])}"
         label = f"{status} · {job.get('vps_ip')}"
         keyboard.append([InlineKeyboardButton(label[:55], callback_data=f"jobs_detail_{job['job_id']}")])
     keyboard.extend([
@@ -585,8 +621,12 @@ def get_job_detail_text(job: dict) -> str:
         f"  Mulai: {format_job_time(job.get('started_at', 0))}",
         f"  Update: {format_job_time(job.get('updated_at', 0))}",
     ]
+    if job.get("status") == "queued":
+        lines.append(f"  Posisi antrean: {get_queue_position(job['job_id']) or '-'}")
     if job.get("completed_at"):
         lines.append(f"  Selesai: {format_job_time(job.get('completed_at', 0))}")
+    if job.get("verification"):
+        lines.append(f"  Verifikasi: {str(job['verification'])[:200]}")
     if job.get("error"):
         lines.extend(["", f"  Pesan: {str(job['error'])[:500]}"])
     lines.extend(["", "─────────────────────────────"])
@@ -2506,8 +2546,17 @@ async def is_port_open(ip: str, port: int, timeout: int = 5) -> bool:
     return await asyncio.to_thread(probe)
 
 
+def linux_os_matches(requested_os: str, detected_os: str) -> bool:
+    """Match the requested Linux family and major/version token."""
+    requested = requested_os.lower()
+    detected = detected_os.lower()
+    family = requested.split()[0] if requested.split() else ""
+    versions = re.findall(r"\d+(?:\.\d+)?", requested)
+    return bool(family and family in detected and all(version in detected for version in versions))
+
+
 def fix_linux_password_sync(vps_ip: str) -> tuple:
-    """Try known installer defaults, then set the established Digicore root login."""
+    """Enable the established root login and return the detected installed OS."""
     default_passwords = [
         "Digicore@1", "digicore", "Bolehtuh1", "LeitboGi0662",
         "Teddysun.com", "teddysun.com", "",
@@ -2540,11 +2589,20 @@ def fix_linux_password_sync(vps_ip: str) -> tuple:
                     "sudo sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
                     "sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
                     "sudo systemctl restart sshd 2>/dev/null; sudo service ssh restart 2>/dev/null; "
-                    "systemctl restart sshd 2>/dev/null; service ssh restart 2>/dev/null; echo 'FIX_DONE'"
+                    "systemctl restart sshd 2>/dev/null; service ssh restart 2>/dev/null; "
+                    "echo 'FIX_DONE'; grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true"
                 )
                 _, stdout, _ = ssh.exec_command(fix_commands, timeout=30)
                 output = stdout.read().decode("utf-8", errors="ignore")
-                return "FIX_DONE" in output, "" if "FIX_DONE" in output else "Perintah perbaikan tidak terverifikasi"
+                fix_success = "FIX_DONE" in output
+                detected_os = ""
+                for line in output.splitlines():
+                    if line.startswith("PRETTY_NAME="):
+                        detected_os = line.split("=", 1)[1].strip().strip("\"'")
+                        break
+                if fix_success and detected_os:
+                    return True, "", detected_os[:200]
+                return False, "OS hasil reinstall tidak dapat dibaca", detected_os[:200]
             except Exception as exc:
                 last_error = str(exc)[:300]
             finally:
@@ -2553,7 +2611,7 @@ def fix_linux_password_sync(vps_ip: str) -> tuple:
                         ssh.close()
                     except Exception:
                         pass
-    return False, last_error
+    return False, last_error, ""
 
 
 async def finish_reinstall_job(
@@ -2561,7 +2619,7 @@ async def finish_reinstall_job(
     job_id: str,
     status: str,
     error: str = "",
-    linux_fix_success=None,
+    verification: str = "",
 ) -> None:
     progress = 100 if status == "completed" else int((get_reinstall_job(job_id) or {}).get("progress", 0))
     job = update_reinstall_job(
@@ -2569,6 +2627,7 @@ async def finish_reinstall_job(
         status=status,
         progress=progress,
         completed_at=int(_time.time()),
+        verification=verification[:200],
         error=error[:500],
     )
     if not job:
@@ -2581,16 +2640,14 @@ async def finish_reinstall_job(
                 "  User: Administrator\n"
                 "  Pass: Teddysun.com"
             )
-            fix_status = ""
+            fix_status = "  Verifikasi: RDP port 3389 READY\n"
         else:
             login = (
                 f"  Host: ssh root@{job['vps_ip']}\n"
                 "  Pass: Digicore@1"
             )
-            fix_status = (
-                "  Root login: FIXED\n" if linux_fix_success
-                else "  Root login: CHECK (coba Digicore@1 atau LeitboGi0662)\n"
-            )
+            detected = verification or "Linux dan SSH siap"
+            fix_status = f"  OS terverifikasi: {detected}\n"
         text = (
             "─────────────────────────────\n"
             "  ✅  Reinstall Selesai\n"
@@ -2654,20 +2711,61 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             offline_seen = True
             update_reinstall_job(job_id, offline_seen=True)
 
-        new_open = await is_port_open(vps_ip, 22)
-        # A normal run must observe the reinstall reboot/offline phase first. After a
-        # bot restart, the bot may legitimately have missed that transition.
-        if new_open and (offline_seen or (recovered and elapsed >= 5 * 60)):
-            linux_fix_success = None
-            if current.get("os_type") == "linux":
-                linux_fix_success, fix_error = await asyncio.to_thread(fix_linux_password_sync, vps_ip)
-                if not linux_fix_success:
-                    logger.warning("Job %s completed but SSH hardening could not be verified: %s", job_id, fix_error)
+        target_port = 3389 if current.get("os_type") == "windows" else 22
+        target_open = await is_port_open(vps_ip, target_port)
+        ready_for_verification = target_open and (
+            offline_seen or (recovered and elapsed >= 5 * 60)
+        )
+        target_online_since = int(current.get("target_online_since") or 0)
+
+        if ready_for_verification and not target_online_since:
+            target_online_since = int(_time.time())
+            current = update_reinstall_job(
+                job_id,
+                target_online_since=target_online_since,
+            ) or current
+        elif not target_open and target_online_since:
+            target_online_since = 0
+            current = update_reinstall_job(job_id, target_online_since=0) or current
+
+        # Give SSH/RDP a short stabilization window before declaring the OS ready.
+        if ready_for_verification and int(_time.time()) - target_online_since >= 45:
+            if current.get("os_type") == "windows":
+                await finish_reinstall_job(
+                    application,
+                    job_id,
+                    "completed",
+                    verification="RDP port 3389 siap",
+                )
+                return
+
+            fix_success, fix_error, detected_os = await asyncio.to_thread(
+                fix_linux_password_sync,
+                vps_ip,
+            )
+            if not fix_success:
+                await finish_reinstall_job(
+                    application,
+                    job_id,
+                    "failed",
+                    "VPS sudah online, tetapi login SSH atau OS belum dapat diverifikasi: " + fix_error,
+                    verification=detected_os,
+                )
+                return
+            if not linux_os_matches(current.get("os_name", ""), detected_os):
+                await finish_reinstall_job(
+                    application,
+                    job_id,
+                    "failed",
+                    f"OS tidak sesuai. Diminta {current.get('os_name')}, terdeteksi {detected_os}.",
+                    verification=detected_os,
+                )
+                return
             await finish_reinstall_job(
                 application,
                 job_id,
                 "completed",
-                linux_fix_success=linux_fix_success,
+                verification=detected_os,
             )
             return
 
@@ -2679,7 +2777,13 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             offline_seen=offline_seen,
         ) or current
         if elapsed - last_notice >= 60 or last_notice == 0:
-            phase_detail = "VPS sedang reboot/install" if offline_seen else "Menunggu VPS masuk tahap reinstall"
+            if ready_for_verification:
+                target_name = "RDP Windows" if current.get("os_type") == "windows" else "OS Linux dan SSH"
+                phase_detail = f"VPS online, menunggu verifikasi {target_name}"
+            elif offline_seen:
+                phase_detail = "VPS sedang reboot/install"
+            else:
+                phase_detail = "Menunggu VPS masuk tahap reinstall"
             await edit_job_progress(
                 application,
                 job_id,
@@ -2769,12 +2873,13 @@ def schedule_reinstall_job(application: Application, job_id: str, data=None, mon
         finally:
             scheduled.discard(job_id)
 
-    if getattr(application, "running", False):
-        application.create_task(runner())
-    else:
-        # post_init runs before Application.running becomes true; the task is safe
-        # because its state is persistent and will be resumed on another restart.
-        asyncio.create_task(runner())
+    # Keep reinstall tasks outside Application.create_task: PTB waits for tracked
+    # tasks during shutdown, while these long-running jobs must stop promptly and
+    # resume from persistent metadata after the service comes back.
+    task = asyncio.create_task(runner())
+    background_tasks = application.bot_data.setdefault("background_reinstall_tasks", set())
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
 
 async def resume_reinstall_jobs(application: Application) -> None:
@@ -2817,34 +2922,44 @@ async def confirm_install(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if len(active_reinstall_jobs(user_id)) >= MAX_ACTIVE_REINSTALL_JOBS_PER_USER:
         await query.edit_message_text(
-            f"⚠️ Batas {MAX_ACTIVE_REINSTALL_JOBS_PER_USER} reinstall job aktif per user tercapai. "
+            f"⚠️ Batas {MAX_ACTIVE_REINSTALL_JOBS_PER_USER} job aktif/antrean per user tercapai. "
             "Tunggu salah satu selesai dan lihat progress melalui /jobs."
         )
         return ConversationHandler.END
 
-    if len(active_reinstall_jobs()) >= MAX_ACTIVE_REINSTALL_JOBS:
+    if len(queued_reinstall_jobs()) >= MAX_QUEUED_REINSTALL_JOBS:
         await query.edit_message_text(
-            f"⚠️ Batas global {MAX_ACTIVE_REINSTALL_JOBS} reinstall job aktif tercapai. "
-            "Silakan coba lagi setelah salah satu job selesai."
+            "⚠️ Antrean reinstall sedang penuh. Silakan tunggu salah satu job mulai atau selesai."
         )
         return ConversationHandler.END
 
+    should_queue = (
+        len(active_reinstall_jobs()) >= MAX_ACTIVE_REINSTALL_JOBS
+        or bool(queued_reinstall_jobs())
+    )
     job = create_reinstall_job(
         user_id=user_id,
         chat_id=query.message.chat_id,
         message_id=query.message.message_id,
         data=data,
     )
+    queue_position = get_queue_position(job["job_id"])
+    title = "⏳  Reinstall Masuk Antrean" if should_queue else "✅  Reinstall Job Dibuat"
+    status_line = (
+        f"Posisi antrean: {queue_position}"
+        if should_queue
+        else "Segera dimulai di background"
+    )
     await query.edit_message_text(
         "─────────────────────────────\n"
-        "  ✅  Reinstall Job Dibuat\n"
+        f"  {title}\n"
         "─────────────────────────────\n\n"
         f"  Job ID: {job['job_id']}\n"
         f"  VPS: {job['vps_ip']}\n"
         f"  OS: {job['os_name']}\n"
-        "  Status: Menunggu proses background\n\n"
-        "  Anda dapat langsung kembali ke menu dan\n"
-        "  memulai reinstall VPS lain.\n"
+        f"  Status: {status_line}\n\n"
+        "  Job akan berjalan otomatis. Anda dapat\n"
+        "  kembali ke menu atau memproses VPS lain.\n"
         "─────────────────────────────",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("📋 Lihat Reinstall Jobs", callback_data="jobs_list")],
@@ -3288,6 +3403,17 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 # ============ Main ============
 
+async def post_stop(application):
+    """Cancel background monitors promptly; persistent metadata resumes them next start."""
+    tasks = list(application.bot_data.get("background_reinstall_tasks", set()))
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("Paused %s reinstall job task(s) for service shutdown", len(tasks))
+
+
 async def post_init(application):
     """Set bot commands, resume jobs, dan kirim notif restart jika ada."""
     application.bot_data["reinstall_jobs_semaphore"] = asyncio.Semaphore(MAX_ACTIVE_REINSTALL_JOBS)
@@ -3357,7 +3483,13 @@ def main() -> None:
     except OSError:
         pass
 
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .post_stop(post_stop)
+        .build()
+    )
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],

@@ -130,7 +130,7 @@ Pass: Digicore@1
 | Owner & User | Owner menambah, menonaktifkan, dan mencabut akses user |
 | Masa Berlaku User | Pilihan 1/7/30 hari, manual 1–3650 hari, atau permanen; akses otomatis ditolak saat kedaluwarsa |
 | Reinstall OS | Windows & Linux, pilih dari menu |
-| Background Reinstall Jobs | Reinstall VPS berbeda berjalan bersamaan, persisten setelah restart bot, dengan `/jobs` untuk progress |
+| Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
 | SSH Command | Kirim command langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime |
 | Reboot | Restart VPS dari Telegram |
@@ -140,6 +140,7 @@ Pass: Digicore@1
 | Edit Password | Ganti password root via SSH |
 | Auto-fix Password | Otomatis fix root password setelah install Linux |
 | Loading UI | Animasi tahapan SSH/download/launch dan progress monitoring perkiraan dalam satu pesan |
+| Verifikasi Hasil | Linux diverifikasi melalui SSH dan `/etc/os-release`; Windows ditunggu sampai RDP port 3389 siap |
 | Keamanan | Password auto-dihapus dari chat |
 
 ---
@@ -218,7 +219,7 @@ User yang belum mendapat akses akan melihat Telegram ID miliknya untuk dikirim k
    cp .env.example .env
    nano .env
    ```
-   Isi `BOT_TOKEN` dengan token dari BotFather. Batas concurrency opsional dapat diatur dengan `MAX_ACTIVE_REINSTALL_JOBS` (default 4) dan `MAX_ACTIVE_REINSTALL_JOBS_PER_USER` (default 3).
+   Isi `BOT_TOKEN` dengan token dari BotFather. Batas opsional: `MAX_ACTIVE_REINSTALL_JOBS` (default 4), `MAX_ACTIVE_REINSTALL_JOBS_PER_USER` (default 3), dan `MAX_QUEUED_REINSTALL_JOBS` (default 20).
 
 5. Jalankan bot:
    ```bash
@@ -338,6 +339,8 @@ systemctl daemon-reload
 - File `.env`, `authorized_users.json`, `vps_data.json`, dan `reinstall_jobs.json` hanya bisa dibaca root (permission 600)
 - `reinstall_jobs.json` hanya menyimpan metadata non-rahasia; password VPS tetap diambil dari bucket VPS milik user saat dibutuhkan
 - Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
+- Saat semua slot eksekusi penuh, job baru masuk antrean otomatis; antrean tetap dibatasi agar server bot terlindungi
+- Linux hanya dinyatakan selesai setelah SSH dan identitas OS terverifikasi; Windows menunggu RDP port 3389 siap
 - Installer target dijalankan detached. Setelah installer dimulai tidak ada tombol cancel yang mengklaim dapat membatalkan reinstall dengan aman
 - Gunakan VPS terpisah untuk menjalankan bot (jangan di VPS yang sama yang mau di-reinstall)
 
