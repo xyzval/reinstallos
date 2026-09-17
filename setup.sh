@@ -35,9 +35,15 @@ if [[ -z "$BOT_TOKEN" ]]; then
     exit 1
 fi
 
-# Get allowed users (optional)
+# Get owner ID (required)
 echo ""
-read -p "Masukkan Telegram User ID kamu (dari @userinfobot): " ALLOWED_USERS
+while true; do
+    read -p "Masukkan Telegram User ID Owner (dari @userinfobot): " OWNER_ID
+    if [[ "$OWNER_ID" =~ ^[0-9]+$ ]]; then
+        break
+    fi
+    echo -e "${RED}[ERROR] Owner ID wajib berupa angka!${NC}"
+done
 echo ""
 
 echo -e "${GREEN}[1/6] Menginstall dependencies...${NC}"
@@ -55,8 +61,9 @@ pip3 install -q python-telegram-bot==21.6 paramiko==3.5.0 python-dotenv==1.0.1 >
 echo -e "${GREEN}[4/6] Membuat konfigurasi...${NC}"
 cat > /opt/reinstallos/.env << EOF
 BOT_TOKEN=${BOT_TOKEN}
-ALLOWED_USERS=${ALLOWED_USERS}
+OWNER_ID=${OWNER_ID}
 EOF
+chmod 600 /opt/reinstallos/.env
 
 echo -e "${GREEN}[5/6] Membuat service systemd (24/7)...${NC}"
 cat > /etc/systemd/system/reinstall-bot.service << 'EOF'
@@ -91,7 +98,7 @@ if systemctl is-active --quiet reinstall-bot; then
     echo ""
     echo -e "  Status    : ${GREEN}AKTIF 24/7${NC}"
     echo -e "  Bot Token : ${BOT_TOKEN:0:10}..."
-    echo -e "  User ID   : ${ALLOWED_USERS}"
+    echo -e "  Owner ID  : ${OWNER_ID}"
     echo ""
     echo -e "${CYAN}Buka Telegram → cari bot kamu → kirim /start${NC}"
     echo ""

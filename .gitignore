@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+.env
+venv/
+vps_data.json
+authorized_users.json
+.restart_notify
+*.tmp.*

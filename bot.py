@@ -18,7 +18,7 @@ import re
 import socket
 import time as _time
 import paramiko
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -27,6 +27,8 @@ from telegram.ext import (
     ConversationHandler,
     filters,
     ContextTypes,
+    TypeHandler,
+    ApplicationHandlerStop,
 )
 from dotenv import load_dotenv
 
@@ -37,19 +39,32 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+# Prevent Telegram bot tokens from being written inside INFO-level HTTP URLs.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ALLOWED_USERS = os.getenv("ALLOWED_USERS", "").split(",")
+LEGACY_ALLOWED_USERS = [
+    item.strip() for item in os.getenv("ALLOWED_USERS", "").split(",") if item.strip()
+]
+OWNER_ID = os.getenv("OWNER_ID", "").strip()
+if not OWNER_ID and LEGACY_ALLOWED_USERS:
+    # Backward-compatible migration for installations created before OWNER_ID.
+    OWNER_ID = LEGACY_ALLOWED_USERS[0]
 
 # Direktori tempat bot.py berada (bukan hardcode /opt/reinstallos), supaya /update
 # dan penyimpanan data tetap benar walau bot diinstall di folder lain.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 VPS_FILE = os.path.join(BASE_DIR, "vps_data.json")
+AUTH_USERS_FILE = os.path.join(BASE_DIR, "authorized_users.json")
 RESTART_NOTIFY_FILE = os.path.join(BASE_DIR, ".restart_notify")
 SERVICE_NAME = os.getenv("SERVICE_NAME", "reinstall-bot")
 
 # Conversation states
-ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD, EDIT_PASS, WIZ_IP, WIZ_PORT, WIZ_USER, WIZ_PASS, EDIT_PORT = range(12)
+(
+    ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD,
+    EDIT_PASS, WIZ_IP, WIZ_PORT, WIZ_USER, WIZ_PASS, EDIT_PORT,
+    OWNER_ADD_USER,
+) = range(13)
 
 
 # OS Options
@@ -75,38 +90,135 @@ LANG_OPTIONS = {"en": "English", "cn": "Chinese", "jp": "Japanese"}
 
 
 
-# ============ VPS Storage ============
+# ============ Per-user Storage & Authorization ============
+
+def _read_json_file(path: str, default):
+    try:
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Read JSON error ({path}): {e}")
+    return default
+
+
+def _atomic_write_json(path: str, data) -> None:
+    """Write JSON atomically with owner-only permissions."""
+    tmp_path = f"{path}.tmp.{os.getpid()}.{_time.time_ns()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
 
 def load_vps_list(user_id: int) -> list:
-    """Load VPS list from JSON file."""
-    try:
-        if os.path.exists(VPS_FILE):
-            with open(VPS_FILE, 'r') as f:
-                data = json.load(f)
-            return data.get(str(user_id), [])
-    except Exception:
-        pass
-    return []
+    """Load only the VPS list belonging to one Telegram user."""
+    data = _read_json_file(VPS_FILE, {})
+    user_vps = data.get(str(user_id), []) if isinstance(data, dict) else []
+    return user_vps if isinstance(user_vps, list) else []
 
 
 def save_vps_list(user_id: int, vps_list: list):
-    """Save VPS list to JSON file."""
+    """Save one user's VPS list without touching another user's list."""
     try:
-        data = {}
-        if os.path.exists(VPS_FILE):
-            with open(VPS_FILE, 'r') as f:
-                data = json.load(f)
+        data = _read_json_file(VPS_FILE, {})
+        if not isinstance(data, dict):
+            data = {}
         data[str(user_id)] = vps_list
-        with open(VPS_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
+        _atomic_write_json(VPS_FILE, data)
     except Exception as e:
         logger.error(f"Save VPS error: {e}")
 
 
+def load_authorized_users() -> dict:
+    """Return {telegram_id: metadata}; the owner is kept separately in .env."""
+    raw = _read_json_file(AUTH_USERS_FILE, {})
+    users = raw.get("users", {}) if isinstance(raw, dict) else {}
+    if not isinstance(users, dict):
+        return {}
+    clean = {}
+    for user_id, record in users.items():
+        uid = str(user_id).strip()
+        if not uid.isdigit() or not isinstance(record, dict):
+            continue
+        clean[uid] = {
+            "name": str(record.get("name", "")).strip()[:40],
+            "active": bool(record.get("active", True)),
+            "added_at": str(record.get("added_at", "")),
+            "added_by": str(record.get("added_by", "")),
+        }
+    return clean
+
+
+def save_authorized_users(users: dict) -> None:
+    _atomic_write_json(AUTH_USERS_FILE, {"version": 1, "users": users})
+
+
+def initialize_auth_storage() -> None:
+    """Create secure auth storage and migrate legacy ALLOWED_USERS once."""
+    if os.path.exists(AUTH_USERS_FILE):
+        try:
+            os.chmod(AUTH_USERS_FILE, 0o600)
+        except OSError:
+            pass
+        return
+
+    migrated = {}
+    for user_id in LEGACY_ALLOWED_USERS:
+        if user_id and user_id != OWNER_ID and user_id.isdigit():
+            migrated[user_id] = {
+                "name": "Migrated user",
+                "active": True,
+                "added_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+                "added_by": OWNER_ID,
+            }
+    save_authorized_users(migrated)
+
+
+def is_owner(user_id: int) -> bool:
+    return bool(OWNER_ID) and str(user_id) == OWNER_ID
+
+
 def is_authorized(user_id: int) -> bool:
-    if not ALLOWED_USERS or ALLOWED_USERS == [""]:
+    if is_owner(user_id):
         return True
-    return str(user_id) in ALLOWED_USERS
+    record = load_authorized_users().get(str(user_id))
+    return bool(record and record.get("active"))
+
+
+def set_authorized_user(user_id: str, name: str, active: bool = True) -> None:
+    users = load_authorized_users()
+    existing = users.get(user_id, {})
+    users[user_id] = {
+        "name": name.strip()[:40],
+        "active": active,
+        "added_at": existing.get("added_at") or _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "added_by": existing.get("added_by") or OWNER_ID,
+    }
+    save_authorized_users(users)
+
+
+def remove_authorized_user(user_id: str) -> bool:
+    users = load_authorized_users()
+    if user_id not in users:
+        return False
+    del users[user_id]
+    save_authorized_users(users)
+    return True
+
+
+def count_user_vps(user_id: str) -> int:
+    return len(load_vps_list(int(user_id)))
 
 
 def parse_vps_detail(text: str) -> dict:
@@ -147,6 +259,8 @@ def get_vps_list_keyboard(user_id: int):
         label = f"🖥 {vps['vps_ip']}:{vps['vps_port']}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"selvps_{i}")])
     keyboard.append([InlineKeyboardButton("➕ Tambah VPS Baru", callback_data="addvps")])
+    if is_owner(user_id):
+        keyboard.append([InlineKeyboardButton("👥 Kelola User", callback_data="owner_users")])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -229,6 +343,226 @@ def get_bulk_example_text():
 
 
 
+# ============ Owner User Management UI ============
+
+def get_owner_users_text() -> str:
+    users = load_authorized_users()
+    active_count = sum(1 for record in users.values() if record.get("active"))
+    lines = [
+        "─────────────────────────────",
+        "  👥  Kelola User",
+        "─────────────────────────────",
+        "",
+        "  👑 Owner: aktif",
+        f"  👤 User: {len(users)} total / {active_count} aktif",
+        "",
+    ]
+    if users:
+        lines.append("  Tekan user untuk aktif/nonaktifkan.")
+        lines.append("  Tombol 🗑 hanya mencabut akses; data VPS tetap ada.")
+    else:
+        lines.append("  Belum ada user tambahan.")
+    lines.extend(["", "─────────────────────────────"])
+    return "\n".join(lines)
+
+
+def get_owner_users_keyboard() -> InlineKeyboardMarkup:
+    users = load_authorized_users()
+    keyboard = []
+    for user_id, record in sorted(users.items(), key=lambda item: int(item[0])):
+        icon = "✅" if record.get("active") else "⛔"
+        name = record.get("name") or "User"
+        label = f"{icon} {name[:18]} · {user_id}"
+        keyboard.append([
+            InlineKeyboardButton(label, callback_data=f"owner_toggle_{user_id}"),
+            InlineKeyboardButton("🗑", callback_data=f"owner_delete_{user_id}"),
+        ])
+    keyboard.extend([
+        [InlineKeyboardButton("➕ Tambah User", callback_data="owner_add")],
+        [InlineKeyboardButton("◀️ Kembali", callback_data="owner_back")],
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def access_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Block every update from unauthorized users before any handler runs."""
+    user = update.effective_user
+    if user and is_authorized(user.id):
+        return
+
+    user_id = str(user.id) if user else "tidak diketahui"
+    if update.callback_query:
+        try:
+            await update.callback_query.answer(
+                "Akses bot tidak tersedia atau sudah dicabut.",
+                show_alert=True,
+            )
+        except Exception:
+            pass
+    elif update.effective_message:
+        await update.effective_message.reply_text(
+            "─────────────────────────────\n"
+            "  ⛔  Akses Ditolak\n"
+            "─────────────────────────────\n\n"
+            f"  Telegram ID Anda: `{user_id}`\n\n"
+            "  Kirim ID ini kepada owner bot agar ditambahkan.\n"
+            "─────────────────────────────",
+            parse_mode="Markdown",
+        )
+    raise ApplicationHandlerStop
+
+
+async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Owner-only inline user management."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if not is_owner(user_id):
+        await query.answer("Fitur ini hanya untuk owner.", show_alert=True)
+        return SELECT_VPS_ACTION
+
+    await query.answer()
+    action = query.data
+
+    if action in ("owner_users", "owner_list"):
+        await query.edit_message_text(
+            get_owner_users_text(),
+            reply_markup=get_owner_users_keyboard(),
+        )
+        return SELECT_VPS_ACTION
+
+    if action == "owner_add":
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ➕  Tambah User\n"
+            "─────────────────────────────\n\n"
+            "  Kirim Telegram User ID. Nama bersifat opsional.\n\n"
+            "  Format:\n"
+            "  `123456789 Nama User`\n\n"
+            "  User ID bisa didapat dari @userinfobot.\n"
+            "─────────────────────────────",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("◀️ Batal", callback_data="owner_users")
+            ]]),
+        )
+        return OWNER_ADD_USER
+
+    if action == "owner_back":
+        vps_list = load_vps_list(user_id)
+        status = "Pilih VPS atau tambah baru:" if vps_list else "Belum ada VPS. Tambahkan VPS baru:"
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  🖥️  Reinstall OS Bot\n"
+            "─────────────────────────────\n\n"
+            f"  {status}\n",
+            reply_markup=get_vps_list_keyboard(user_id),
+        )
+        return SELECT_VPS_ACTION
+
+    if action.startswith("owner_toggle_"):
+        target_id = action.split("owner_toggle_", 1)[1]
+        users = load_authorized_users()
+        record = users.get(target_id)
+        if not record:
+            await query.edit_message_text(
+                "User tidak ditemukan atau sudah dihapus.",
+                reply_markup=get_owner_users_keyboard(),
+            )
+        else:
+            record["active"] = not bool(record.get("active"))
+            users[target_id] = record
+            save_authorized_users(users)
+            await query.edit_message_text(
+                get_owner_users_text(),
+                reply_markup=get_owner_users_keyboard(),
+            )
+        return SELECT_VPS_ACTION
+
+    if action.startswith("owner_deleteyes_"):
+        target_id = action.split("owner_deleteyes_", 1)[1]
+        remove_authorized_user(target_id)
+        await query.edit_message_text(
+            get_owner_users_text(),
+            reply_markup=get_owner_users_keyboard(),
+        )
+        return SELECT_VPS_ACTION
+
+    if action.startswith("owner_delete_"):
+        target_id = action.split("owner_delete_", 1)[1]
+        record = load_authorized_users().get(target_id)
+        if not record:
+            await query.edit_message_text(
+                "User tidak ditemukan.",
+                reply_markup=get_owner_users_keyboard(),
+            )
+            return SELECT_VPS_ACTION
+        name = record.get("name") or "User"
+        vps_count = count_user_vps(target_id)
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  🗑  Cabut Akses User?\n"
+            "─────────────────────────────\n\n"
+            f"  Nama: {name}\n"
+            f"  Telegram ID: {target_id}\n"
+            f"  VPS tersimpan: {vps_count}\n\n"
+            "  Akses akan dicabut, tetapi data VPS user tidak\n"
+            "  dihapus dan bisa digunakan lagi bila ditambahkan.\n"
+            "─────────────────────────────",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🗑 Ya, Cabut Akses", callback_data=f"owner_deleteyes_{target_id}")],
+                [InlineKeyboardButton("◀️ Batal", callback_data="owner_users")],
+            ]),
+        )
+        return SELECT_VPS_ACTION
+
+    return SELECT_VPS_ACTION
+
+
+async def owner_add_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Save a new authorized user entered by the owner."""
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("Fitur ini hanya untuk owner.")
+        return ConversationHandler.END
+
+    raw = update.message.text.strip()
+    parts = raw.split(maxsplit=1)
+    target_id = parts[0] if parts else ""
+    name = parts[1].strip() if len(parts) > 1 else "User"
+    name = re.sub(r"[\r\n\t]+", " ", name)[:40]
+
+    if not target_id.isdigit() or not 1 <= len(target_id) <= 20 or int(target_id) <= 0:
+        await update.message.reply_text(
+            "❌ Telegram User ID tidak valid.\n\n"
+            "Contoh: `123456789 Nama User`\n"
+            "Kirim ulang atau tekan /start untuk batal.",
+            parse_mode="Markdown",
+        )
+        return OWNER_ADD_USER
+
+    if target_id == OWNER_ID:
+        await update.message.reply_text(
+            "ℹ️ ID tersebut adalah owner dan sudah memiliki akses permanen.",
+            reply_markup=get_owner_users_keyboard(),
+        )
+        return SELECT_VPS_ACTION
+
+    set_authorized_user(target_id, name or "User", active=True)
+    await update.message.reply_text(
+        "─────────────────────────────\n"
+        "  ✅  User Ditambahkan\n"
+        "─────────────────────────────\n\n"
+        f"  Nama: {name or 'User'}\n"
+        f"  Telegram ID: {target_id}\n"
+        "  Status: aktif\n\n"
+        "  User sekarang dapat mengirim /start dan menambahkan\n"
+        "  VPS miliknya sendiri.\n"
+        "─────────────────────────────\n\n"
+        + get_owner_users_text(),
+        reply_markup=get_owner_users_keyboard(),
+    )
+    return SELECT_VPS_ACTION
+
+
 # ============ Handlers ============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -249,13 +583,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return SELECT_VPS_ACTION
     else:
+        extra = "\n  Owner dapat mengelola akses user dari menu." if is_owner(user_id) else ""
         await update.message.reply_text(
             "─────────────────────────────\n"
             "  🖥️  Reinstall OS Bot\n"
             "─────────────────────────────\n\n"
             "  Belum ada VPS tersimpan.\n"
-            "  Pilih cara tambah VPS:\n",
-            reply_markup=get_add_method_keyboard(),
+            "  Tambahkan VPS milik Anda sendiri."
+            f"{extra}\n",
+            reply_markup=get_vps_list_keyboard(user_id),
         )
         return SELECT_VPS_ACTION
 
@@ -1928,7 +2264,8 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     Pakai '/update force' untuk memaksa reset + restart walau terlihat sudah terbaru.
     """
-    if not is_authorized(update.effective_user.id):
+    if not is_owner(update.effective_user.id):
+        await update.message.reply_text("⛔ Perintah /update hanya dapat digunakan owner.")
         return
 
     force = bool(context.args) and context.args[0].lower() in ("force", "-f", "paksa")
@@ -2052,7 +2389,14 @@ async def cmd_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Help command."""
+    """Help command with owner-only entries shown only to the owner."""
+    owner_help = ""
+    if is_owner(update.effective_user.id):
+        owner_help = (
+            "  /update   - Update bot dari GitHub (owner)\n\n"
+            "Menu Owner:\n"
+            "  👥 Kelola User - Tambah, aktif/nonaktif, dan cabut akses\n\n"
+        )
     await update.message.reply_text(
         "─────────────────────────────\n"
         "  🖥️  Reinstall OS Bot v2.0\n"
@@ -2063,16 +2407,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "  /ssh CMD  - SSH command\n"
         "  /reboot   - Reboot VPS\n"
         "  /ping     - Cek online (alias /status)\n"
-        "  /update   - Update bot dari GitHub\n"
         "  /version  - Cek versi bot yang jalan\n"
-        "  /help     - Bantuan\n\n"
+        "  /help     - Bantuan\n"
+        + owner_help +
         "Menu VPS:\n"
-        "  🔧 Edit Port  - Tambah/aktifkan port SSH baru (port lama tetap jalan)\n\n"
-        "Tambah VPS:\n"
+        "  🔧 Edit Port - Tambah port SSH, port lama tetap jalan\n\n"
+        "Tambah VPS milik sendiri:\n"
         "  Kirim langsung: ip:port@user:password\n\n"
-        "Password:\n"
-        "  Windows: Teddysun.com\n"
-        "  Linux: Digicore@1\n\n"
+        "Setiap user hanya melihat daftar VPS miliknya sendiri.\n"
         "─────────────────────────────"
     )
 
@@ -2087,17 +2429,28 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def post_init(application):
     """Set bot commands menu dan kirim notif restart jika ada."""
-    commands = [
-        BotCommand("start", "Menu VPS"),
-        BotCommand("info", "Info VPS"),
+    user_commands = [
+        BotCommand("start", "Menu VPS saya"),
+        BotCommand("info", "Info VPS aktif"),
         BotCommand("ssh", "SSH command"),
         BotCommand("reboot", "Reboot VPS"),
         BotCommand("ping", "Cek online/offline"),
-        BotCommand("update", "Update bot dari GitHub"),
-        BotCommand("version", "Cek versi bot yang jalan"),
+        BotCommand("version", "Cek versi bot"),
         BotCommand("help", "Bantuan"),
     ]
-    await application.bot.set_my_commands(commands)
+    owner_commands = user_commands[:-2] + [
+        BotCommand("update", "Update bot dari GitHub"),
+    ] + user_commands[-2:]
+    # Default command menu never exposes owner-only maintenance commands.
+    await application.bot.set_my_commands(user_commands)
+    try:
+        # A new owner chat may not exist yet until the owner has opened the bot.
+        await application.bot.set_my_commands(
+            owner_commands,
+            scope=BotCommandScopeChat(chat_id=int(OWNER_ID)),
+        )
+    except Exception as e:
+        logger.warning(f"Owner command scope not ready yet: {e}")
 
     # Kirim notifikasi restart berhasil jika ada
     restart_file = RESTART_NOTIFY_FILE
@@ -2127,6 +2480,16 @@ def main() -> None:
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN not set!")
         return
+    if not OWNER_ID or not OWNER_ID.isdigit():
+        print("ERROR: OWNER_ID not set or invalid! Configure OWNER_ID in .env.")
+        return
+
+    initialize_auth_storage()
+    try:
+        if os.path.exists(VPS_FILE):
+            os.chmod(VPS_FILE, 0o600)
+    except OSError:
+        pass
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
@@ -2138,6 +2501,7 @@ def main() -> None:
                 CallbackQueryHandler(select_vps, pattern="^(selvps_|addvps|add_)"),
             ],
             SELECT_VPS_ACTION: [
+                CallbackQueryHandler(owner_callback, pattern="^owner_"),
                 CallbackQueryHandler(select_vps, pattern="^(selvps_|addvps|add_)"),
                 CallbackQueryHandler(handle_action, pattern="^act_"),
                 CallbackQueryHandler(select_os_category, pattern="^cat_"),
@@ -2176,11 +2540,17 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_port_handler),
                 CallbackQueryHandler(handle_action, pattern="^act_"),
             ],
+            OWNER_ADD_USER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, owner_add_user_handler),
+                CallbackQueryHandler(owner_callback, pattern="^owner_"),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
         allow_reentry=True,
     )
 
+    # Security gate runs before every command, message, and callback.
+    app.add_handler(TypeHandler(Update, access_guard), group=-1)
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("ssh", cmd_ssh))

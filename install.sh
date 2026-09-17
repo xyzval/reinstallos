@@ -149,12 +149,18 @@ get_config() {
     done
     echo ""
     
-    # Allowed Users
-    echo -e "  ${CYAN}2. Telegram User ID (opsional)${NC}"
+    # Owner ID (required)
+    echo -e "  ${CYAN}2. Telegram User ID Owner (wajib)${NC}"
     echo -e "     Dapatkan dari @userinfobot di Telegram"
-    echo -e "     Kosongkan = semua orang bisa pakai"
+    echo -e "     Owner dapat menambah user lain dari menu bot"
     echo ""
-    read -p "     Masukkan User ID: " ALLOWED_USERS
+    while true; do
+        read -p "     Masukkan Owner ID: " OWNER_ID
+        if [[ "$OWNER_ID" =~ ^[0-9]+$ ]]; then
+            break
+        fi
+        print_error "Owner ID wajib berupa angka!"
+    done
     echo ""
 }
 
@@ -162,7 +168,7 @@ get_config() {
 create_env() {
     cat > "$INSTALL_DIR/.env" << EOF
 BOT_TOKEN=${BOT_TOKEN}
-ALLOWED_USERS=${ALLOWED_USERS}
+OWNER_ID=${OWNER_ID}
 EOF
     chmod 600 "$INSTALL_DIR/.env"
     print_step "Konfigurasi tersimpan"

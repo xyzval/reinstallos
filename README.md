@@ -29,7 +29,7 @@ bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/instal
 - ✅ Download bot dari GitHub ke `/opt/reinstallos`
 - ✅ Buat virtual environment Python
 - ✅ Minta Bot Token (dari @BotFather)
-- ✅ Minta Telegram User ID (opsional, untuk keamanan)
+- ✅ Minta Telegram User ID owner (wajib)
 - ✅ Setup service systemd (bot jalan 24/7 non-stop)
 - ✅ Auto-restart jika bot crash (delay 5 detik)
 - ✅ Auto-start saat VPS/server reboot
@@ -73,7 +73,7 @@ bash <(curl -sL https://raw.githubusercontent.com/xyzval/reinstallos/main/instal
 Installer akan bertanya:
 ```
 1. Bot Token: [paste token dari BotFather]
-2. Telegram User ID: [isi user ID kamu, atau kosongkan]
+2. Telegram Owner ID: [isi Telegram User ID owner, wajib]
 ```
 
 Setelah itu bot langsung jalan! ✅
@@ -125,7 +125,8 @@ Pass: Bolehtuh1
 
 | Fitur | Keterangan |
 |---|---|
-| Multi-VPS | Simpan banyak VPS sekaligus |
+| Multi-VPS per User | Setiap user hanya melihat dan mengelola VPS miliknya sendiri |
+| Owner & User | Owner menambah, menonaktifkan, dan mencabut akses user |
 | Reinstall OS | Windows & Linux, pilih dari menu |
 | SSH Command | Kirim command langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime |
@@ -137,6 +138,32 @@ Pass: Bolehtuh1
 | Auto-fix Password | Otomatis fix root password setelah install Linux |
 | Loading UI | Progress bar real-time saat install |
 | Keamanan | Password auto-dihapus dari chat |
+
+---
+
+## 👥 Sistem Owner dan User
+
+- `OWNER_ID` disimpan di `.env` dan memiliki akses owner permanen.
+- Tombol **👥 Kelola User** hanya muncul kepada owner.
+- Owner dapat menambah user menggunakan Telegram User ID dan nama opsional.
+- User aktif dapat menambah VPS sendiri; daftar VPS dipisahkan berdasarkan Telegram User ID.
+- User tidak dapat melihat atau mengendalikan VPS milik user lain maupun milik owner.
+- Owner dapat menonaktifkan atau mencabut akses tanpa menghapus data VPS user.
+- Semua command, pesan, dan callback melewati pemeriksaan izin di sisi server.
+
+Alur owner:
+
+```text
+/start → 👥 Kelola User → ➕ Tambah User
+```
+
+Format penambahan user:
+
+```text
+123456789 Nama User
+```
+
+User yang belum mendapat akses akan melihat Telegram ID miliknya untuk dikirim kepada owner.
 
 ---
 
@@ -281,7 +308,7 @@ journalctl -u reinstall-bot -n 50
 # Update bot ke versi terbaru
 cd /opt/reinstallos && git pull && systemctl restart reinstall-bot
 
-# Edit konfigurasi (ganti token/user ID)
+# Edit konfigurasi (ganti token/owner ID)
 nano /opt/reinstallos/.env
 systemctl restart reinstall-bot
 
@@ -297,10 +324,10 @@ systemctl daemon-reload
 
 ## 🔒 Keamanan
 
-- Set `ALLOWED_USERS` di `.env` agar hanya kamu yang bisa pakai bot
+- Set `OWNER_ID` di `.env`; user lain hanya dapat ditambahkan oleh owner melalui bot
 - Password VPS otomatis dihapus dari chat setelah dikirim
 - Jangan share bot token ke siapapun
-- File `.env` hanya bisa dibaca oleh root (permission 600)
+- File `.env`, `authorized_users.json`, dan `vps_data.json` hanya bisa dibaca root (permission 600)
 - Gunakan VPS terpisah untuk menjalankan bot (jangan di VPS yang sama yang mau di-reinstall)
 
 ---
