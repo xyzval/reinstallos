@@ -2635,7 +2635,12 @@ async def process_reinstall_job(application: Application, job_id: str, data=None
             "─────────────────────────────",
         )
         update_reinstall_job(job_id, status="launching", progress=15)
-        ok, result = await asyncio.to_thread(launch_reinstall_sync, data)
+        try:
+            ok, result = await asyncio.to_thread(launch_reinstall_sync, data)
+        finally:
+            # The persistent VPS bucket remains the source of truth; do not retain
+            # another plaintext password in this long-lived background task.
+            data.pop("vps_pass", None)
         if not ok:
             await finish_reinstall_job(application, job_id, "failed", result)
             return
