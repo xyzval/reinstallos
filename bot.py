@@ -614,7 +614,7 @@ def get_job_detail_text(job: dict) -> str:
         "",
         f"  Job ID: {job.get('job_id')}",
         f"  VPS: {job.get('vps_ip')}:{job.get('vps_port')}",
-        f"  OS: {job.get('os_name')}",
+        f"  OS diminta: {job.get('os_name')}",
         f"  Status: {status}",
         f"  Progress: {int(job.get('progress', 0))}%",
         f"  Dibuat: {format_job_time(job.get('created_at', 0))}",
@@ -625,8 +625,20 @@ def get_job_detail_text(job: dict) -> str:
         lines.append(f"  Posisi antrean: {get_queue_position(job['job_id']) or '-'}")
     if job.get("completed_at"):
         lines.append(f"  Selesai: {format_job_time(job.get('completed_at', 0))}")
+        started = int(job.get("started_at") or 0)
+        completed = int(job.get("completed_at") or 0)
+        if started and completed >= started:
+            lines.append(f"  Durasi: {int((completed - started) / 60)} menit")
     if job.get("verification"):
-        lines.append(f"  Verifikasi: {str(job['verification'])[:200]}")
+        if job.get("os_type") == "linux":
+            lines.append(f"  OS terdeteksi: {str(job['verification'])[:200]}")
+        else:
+            lines.append(f"  Verifikasi: {str(job['verification'])[:200]}")
+    if job.get("status") == "completed":
+        if job.get("os_type") == "linux":
+            lines.extend(["  SSH port 22: READY", "  Login root: READY"])
+        else:
+            lines.append("  RDP port 3389: READY")
     if job.get("error"):
         lines.extend(["", f"  Pesan: {str(job['error'])[:500]}"])
     lines.extend(["", "─────────────────────────────"])
@@ -2644,10 +2656,16 @@ async def finish_reinstall_job(
         else:
             login = (
                 f"  Host: ssh root@{job['vps_ip']}\n"
+                "  Port: 22\n"
+                "  User: root\n"
                 "  Pass: Digicore@1"
             )
             detected = verification or "Linux dan SSH siap"
-            fix_status = f"  OS terverifikasi: {detected}\n"
+            fix_status = (
+                f"  OS terverifikasi: {detected}\n"
+                "  SSH port 22: READY\n"
+                "  Login root: READY\n"
+            )
         text = (
             "─────────────────────────────\n"
             "  ✅  Reinstall Selesai\n"
