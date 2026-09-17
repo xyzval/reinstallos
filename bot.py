@@ -63,8 +63,8 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "reinstall-bot")
 (
     ADD_VPS, SELECT_VPS_ACTION, SELECT_OS, SELECT_LANG, CONFIRM, SSH_CMD,
     EDIT_PASS, WIZ_IP, WIZ_PORT, WIZ_USER, WIZ_PASS, EDIT_PORT,
-    OWNER_ADD_USER,
-) = range(13)
+    OWNER_ADD_USER, OWNER_SELECT_EXPIRY,
+) = range(14)
 
 
 # OS Options
@@ -151,17 +151,23 @@ def load_authorized_users() -> dict:
         uid = str(user_id).strip()
         if not uid.isdigit() or not isinstance(record, dict):
             continue
+        expires_at = record.get("expires_at")
+        try:
+            expires_at = int(expires_at) if expires_at not in (None, "", 0, "0") else None
+        except (TypeError, ValueError):
+            expires_at = None
         clean[uid] = {
             "name": str(record.get("name", "")).strip()[:40],
             "active": bool(record.get("active", True)),
             "added_at": str(record.get("added_at", "")),
             "added_by": str(record.get("added_by", "")),
+            "expires_at": expires_at,
         }
     return clean
 
 
 def save_authorized_users(users: dict) -> None:
-    _atomic_write_json(AUTH_USERS_FILE, {"version": 1, "users": users})
+    _atomic_write_json(AUTH_USERS_FILE, {"version": 2, "users": users})
 
 
 def initialize_auth_storage() -> None:
@@ -181,6 +187,7 @@ def initialize_auth_storage() -> None:
                 "active": True,
                 "added_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
                 "added_by": OWNER_ID,
+                "expires_at": None,
             }
     save_authorized_users(migrated)
 
@@ -189,14 +196,49 @@ def is_owner(user_id: int) -> bool:
     return bool(OWNER_ID) and str(user_id) == OWNER_ID
 
 
+def is_user_expired(record: dict, now: int = None) -> bool:
+    expires_at = record.get("expires_at")
+    if expires_at in (None, "", 0, "0"):
+        return False
+    try:
+        current = int(_time.time()) if now is None else int(now)
+        return int(expires_at) <= current
+    except (TypeError, ValueError):
+        return False
+
+
+def user_record_has_access(record: dict, now: int = None) -> bool:
+    return bool(record.get("active")) and not is_user_expired(record, now)
+
+
+def format_expiry(record: dict, short: bool = False) -> str:
+    expires_at = record.get("expires_at")
+    if expires_at in (None, "", 0, "0"):
+        return "Permanen" if not short else "∞"
+    try:
+        # Display in WIB (UTC+7); storage remains a timezone-neutral Unix timestamp.
+        wib = _time.gmtime(int(expires_at) + 7 * 3600)
+        return _time.strftime("%d-%m-%Y %H:%M WIB", wib) if not short else _time.strftime("%d/%m/%y", wib)
+    except (TypeError, ValueError, OverflowError):
+        return "Tidak valid"
+
+
+def user_status(record: dict) -> str:
+    if is_user_expired(record):
+        return "⌛ Kedaluwarsa"
+    if not record.get("active"):
+        return "⛔ Nonaktif"
+    return "✅ Aktif"
+
+
 def is_authorized(user_id: int) -> bool:
     if is_owner(user_id):
         return True
     record = load_authorized_users().get(str(user_id))
-    return bool(record and record.get("active"))
+    return bool(record and user_record_has_access(record))
 
 
-def set_authorized_user(user_id: str, name: str, active: bool = True) -> None:
+def set_authorized_user(user_id: str, name: str, active: bool = True, expires_at=None) -> None:
     users = load_authorized_users()
     existing = users.get(user_id, {})
     users[user_id] = {
@@ -204,6 +246,7 @@ def set_authorized_user(user_id: str, name: str, active: bool = True) -> None:
         "active": active,
         "added_at": existing.get("added_at") or _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
         "added_by": existing.get("added_by") or OWNER_ID,
+        "expires_at": int(expires_at) if expires_at not in (None, "", 0, "0") else None,
     }
     save_authorized_users(users)
 
@@ -347,19 +390,21 @@ def get_bulk_example_text():
 
 def get_owner_users_text() -> str:
     users = load_authorized_users()
-    active_count = sum(1 for record in users.values() if record.get("active"))
+    accessible = sum(1 for record in users.values() if user_record_has_access(record))
+    expired = sum(1 for record in users.values() if is_user_expired(record))
     lines = [
         "─────────────────────────────",
         "  👥  Kelola User",
         "─────────────────────────────",
         "",
-        "  👑 Owner: aktif",
-        f"  👤 User: {len(users)} total / {active_count} aktif",
+        "  👑 Owner: aktif permanen",
+        f"  👤 User: {len(users)} total / {accessible} dapat akses",
+        f"  ⌛ Kedaluwarsa: {expired}",
         "",
     ]
     if users:
-        lines.append("  Tekan user untuk aktif/nonaktifkan.")
-        lines.append("  Tombol 🗑 hanya mencabut akses; data VPS tetap ada.")
+        lines.append("  Tekan nama user untuk detail/perpanjang.")
+        lines.append("  Tombol ⏯ mengubah status aktif/nonaktif.")
     else:
         lines.append("  Belum ada user tambahan.")
     lines.extend(["", "─────────────────────────────"])
@@ -370,11 +415,13 @@ def get_owner_users_keyboard() -> InlineKeyboardMarkup:
     users = load_authorized_users()
     keyboard = []
     for user_id, record in sorted(users.items(), key=lambda item: int(item[0])):
-        icon = "✅" if record.get("active") else "⛔"
+        icon = "⌛" if is_user_expired(record) else "✅" if record.get("active") else "⛔"
         name = record.get("name") or "User"
-        label = f"{icon} {name[:18]} · {user_id}"
+        expiry = format_expiry(record, short=True)
+        label = f"{icon} {name[:12]} · {expiry}"
         keyboard.append([
-            InlineKeyboardButton(label, callback_data=f"owner_toggle_{user_id}"),
+            InlineKeyboardButton(label, callback_data=f"owner_detail_{user_id}"),
+            InlineKeyboardButton("⏯", callback_data=f"owner_toggle_{user_id}"),
             InlineKeyboardButton("🗑", callback_data=f"owner_delete_{user_id}"),
         ])
     keyboard.extend([
@@ -382,6 +429,37 @@ def get_owner_users_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("◀️ Kembali", callback_data="owner_back")],
     ])
     return InlineKeyboardMarkup(keyboard)
+
+
+def get_expiry_selection_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("1 Hari", callback_data="owner_expiry_1"),
+            InlineKeyboardButton("7 Hari", callback_data="owner_expiry_7"),
+        ],
+        [
+            InlineKeyboardButton("30 Hari", callback_data="owner_expiry_30"),
+            InlineKeyboardButton("♾ Permanen", callback_data="owner_expiry_perm"),
+        ],
+        [InlineKeyboardButton("◀️ Batal", callback_data="owner_users")],
+    ])
+
+
+def get_owner_user_detail_keyboard(user_id: str, record: dict) -> InlineKeyboardMarkup:
+    toggle_label = "⛔ Nonaktifkan" if record.get("active") else "✅ Aktifkan"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("+1 Hari", callback_data=f"owner_extend_1_{user_id}"),
+            InlineKeyboardButton("+7 Hari", callback_data=f"owner_extend_7_{user_id}"),
+            InlineKeyboardButton("+30 Hari", callback_data=f"owner_extend_30_{user_id}"),
+        ],
+        [InlineKeyboardButton("♾ Jadikan Permanen", callback_data=f"owner_permanent_{user_id}")],
+        [InlineKeyboardButton(toggle_label, callback_data=f"owner_toggle_{user_id}")],
+        [InlineKeyboardButton("🗑 Cabut Akses", callback_data=f"owner_delete_{user_id}")],
+        [InlineKeyboardButton("◀️ Daftar User", callback_data="owner_users")],
+    ])
+
+
 
 
 async def access_guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -424,6 +502,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     action = query.data
 
     if action in ("owner_users", "owner_list"):
+        context.user_data.pop("pending_auth_user", None)
         await query.edit_message_text(
             get_owner_users_text(),
             reply_markup=get_owner_users_keyboard(),
@@ -446,6 +525,114 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ]]),
         )
         return OWNER_ADD_USER
+
+    if action.startswith("owner_expiry_"):
+        pending = context.user_data.get("pending_auth_user")
+        if not pending:
+            await query.edit_message_text(
+                "Sesi tambah user sudah berakhir. Silakan mulai kembali.",
+                reply_markup=get_owner_users_keyboard(),
+            )
+            return SELECT_VPS_ACTION
+        duration = action.split("owner_expiry_", 1)[1]
+        if duration not in ("1", "7", "30", "perm"):
+            await query.edit_message_text(
+                "Pilihan masa berlaku tidak valid. Silakan ulangi.",
+                reply_markup=get_expiry_selection_keyboard(),
+            )
+            return OWNER_SELECT_EXPIRY
+        expires_at = None if duration == "perm" else int(_time.time()) + int(duration) * 86400
+        set_authorized_user(
+            pending["user_id"], pending["name"], active=True, expires_at=expires_at
+        )
+        context.user_data.pop("pending_auth_user", None)
+        record = load_authorized_users()[pending["user_id"]]
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ✅  User Ditambahkan\n"
+            "─────────────────────────────\n\n"
+            f"  Nama: {pending['name']}\n"
+            f"  Telegram ID: {pending['user_id']}\n"
+            f"  Berlaku sampai: {format_expiry(record)}\n"
+            "  Status: aktif\n\n"
+            "  User dapat mengirim /start dan menambahkan VPS\n"
+            "  miliknya sendiri.\n"
+            "─────────────────────────────",
+            reply_markup=get_owner_users_keyboard(),
+        )
+        return SELECT_VPS_ACTION
+
+    if action.startswith("owner_detail_"):
+        target_id = action.split("owner_detail_", 1)[1]
+        record = load_authorized_users().get(target_id)
+        if not record:
+            await query.edit_message_text("User tidak ditemukan.", reply_markup=get_owner_users_keyboard())
+            return SELECT_VPS_ACTION
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  👤  Detail User\n"
+            "─────────────────────────────\n\n"
+            f"  Nama: {record.get('name') or 'User'}\n"
+            f"  Telegram ID: {target_id}\n"
+            f"  Status: {user_status(record)}\n"
+            f"  Berlaku sampai: {format_expiry(record)}\n"
+            f"  VPS tersimpan: {count_user_vps(target_id)}\n\n"
+            "  User kedaluwarsa otomatis ditolak oleh semua fitur.\n"
+            "─────────────────────────────",
+            reply_markup=get_owner_user_detail_keyboard(target_id, record),
+        )
+        return SELECT_VPS_ACTION
+
+    if action.startswith("owner_extend_"):
+        match = re.fullmatch(r"owner_extend_(1|7|30)_([0-9]+)", action)
+        if not match:
+            return SELECT_VPS_ACTION
+        days, target_id = int(match.group(1)), match.group(2)
+        users = load_authorized_users()
+        record = users.get(target_id)
+        if not record:
+            await query.edit_message_text("User tidak ditemukan.", reply_markup=get_owner_users_keyboard())
+            return SELECT_VPS_ACTION
+        current_expiry = record.get("expires_at")
+        base = max(int(_time.time()), int(current_expiry or 0))
+        record["expires_at"] = base + days * 86400
+        record["active"] = True
+        users[target_id] = record
+        save_authorized_users(users)
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ✅  Masa Berlaku Diperpanjang\n"
+            "─────────────────────────────\n\n"
+            f"  User: {record.get('name') or target_id}\n"
+            f"  Berlaku sampai: {format_expiry(record)}\n"
+            "  Status: aktif\n"
+            "─────────────────────────────",
+            reply_markup=get_owner_user_detail_keyboard(target_id, record),
+        )
+        return SELECT_VPS_ACTION
+
+    if action.startswith("owner_permanent_"):
+        target_id = action.split("owner_permanent_", 1)[1]
+        users = load_authorized_users()
+        record = users.get(target_id)
+        if not record:
+            await query.edit_message_text("User tidak ditemukan.", reply_markup=get_owner_users_keyboard())
+            return SELECT_VPS_ACTION
+        record["expires_at"] = None
+        record["active"] = True
+        users[target_id] = record
+        save_authorized_users(users)
+        await query.edit_message_text(
+            "─────────────────────────────\n"
+            "  ✅  Akses Dijadikan Permanen\n"
+            "─────────────────────────────\n\n"
+            f"  User: {record.get('name') or target_id}\n"
+            "  Berlaku sampai: Permanen\n"
+            "  Status: aktif\n"
+            "─────────────────────────────",
+            reply_markup=get_owner_user_detail_keyboard(target_id, record),
+        )
+        return SELECT_VPS_ACTION
 
     if action == "owner_back":
         vps_list = load_vps_list(user_id)
@@ -473,8 +660,14 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             users[target_id] = record
             save_authorized_users(users)
             await query.edit_message_text(
-                get_owner_users_text(),
-                reply_markup=get_owner_users_keyboard(),
+                "─────────────────────────────\n"
+                "  👤  Status User Diubah\n"
+                "─────────────────────────────\n\n"
+                f"  User: {record.get('name') or target_id}\n"
+                f"  Status: {user_status(record)}\n"
+                f"  Berlaku sampai: {format_expiry(record)}\n"
+                "─────────────────────────────",
+                reply_markup=get_owner_user_detail_keyboard(target_id, record),
             )
         return SELECT_VPS_ACTION
 
@@ -519,7 +712,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def owner_add_user_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Save a new authorized user entered by the owner."""
+    """Validate a new user, then ask the owner to choose an expiry."""
     if not is_owner(update.effective_user.id):
         await update.message.reply_text("Fitur ini hanya untuk owner.")
         return ConversationHandler.END
@@ -541,26 +734,27 @@ async def owner_add_user_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if target_id == OWNER_ID:
         await update.message.reply_text(
-            "ℹ️ ID tersebut adalah owner dan sudah memiliki akses permanen.",
+            "ℹ️ ID tersebut adalah owner dan memiliki akses permanen.",
             reply_markup=get_owner_users_keyboard(),
         )
         return SELECT_VPS_ACTION
 
-    set_authorized_user(target_id, name or "User", active=True)
+    context.user_data["pending_auth_user"] = {
+        "user_id": target_id,
+        "name": name or "User",
+    }
     await update.message.reply_text(
         "─────────────────────────────\n"
-        "  ✅  User Ditambahkan\n"
+        "  ⏳  Pilih Masa Berlaku\n"
         "─────────────────────────────\n\n"
         f"  Nama: {name or 'User'}\n"
-        f"  Telegram ID: {target_id}\n"
-        "  Status: aktif\n\n"
-        "  User sekarang dapat mengirim /start dan menambahkan\n"
-        "  VPS miliknya sendiri.\n"
-        "─────────────────────────────\n\n"
-        + get_owner_users_text(),
-        reply_markup=get_owner_users_keyboard(),
+        f"  Telegram ID: {target_id}\n\n"
+        "  Setelah waktu habis, seluruh tombol, pesan, dan\n"
+        "  command user akan otomatis ditolak.\n"
+        "─────────────────────────────",
+        reply_markup=get_expiry_selection_keyboard(),
     )
-    return SELECT_VPS_ACTION
+    return OWNER_SELECT_EXPIRY
 
 
 # ============ Handlers ============
@@ -2542,6 +2736,9 @@ def main() -> None:
             ],
             OWNER_ADD_USER: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, owner_add_user_handler),
+                CallbackQueryHandler(owner_callback, pattern="^owner_"),
+            ],
+            OWNER_SELECT_EXPIRY: [
                 CallbackQueryHandler(owner_callback, pattern="^owner_"),
             ],
         },
