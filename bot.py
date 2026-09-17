@@ -394,11 +394,12 @@ def get_bulk_example_text():
 
 # ============ Persistent Reinstall Jobs ============
 
-ACTIVE_JOB_STATES = {"queued", "connecting", "launching", "monitoring"}
+ACTIVE_JOB_STATES = {"queued", "connecting", "downloading", "launching", "monitoring"}
 TERMINAL_JOB_STATES = {"completed", "failed", "timeout"}
 JOB_STATUS_LABELS = {
     "queued": "⏳ Menunggu",
     "connecting": "🔌 Menghubungkan",
+    "downloading": "⬇️ Mengunduh installer",
     "launching": "🚀 Menjalankan installer",
     "monitoring": "⚙️ Installing/monitoring",
     "completed": "✅ Selesai",
@@ -2304,6 +2305,89 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 
 
+def build_install_progress_text(
+    job: dict,
+    phase: str,
+    progress: int,
+    elapsed_seconds: int = 0,
+    detail: str = "",
+) -> str:
+    """Render the familiar single-message loading UI while the job runs in background."""
+    phase_rows = {
+        "queued": (
+            "  ○ SSH Connection      WAITING",
+            "  ○ Download Script     WAITING",
+            "  ○ Run Installer       WAITING",
+            "  ○ Monitoring          WAITING",
+        ),
+        "connecting": (
+            "  ◐ SSH Connection      CONNECTING",
+            "  ○ Download Script     WAITING",
+            "  ○ Run Installer       WAITING",
+            "  ○ Monitoring          WAITING",
+        ),
+        "downloading": (
+            "  ● SSH Connection      DONE",
+            "  ◐ Download Script     DOWNLOADING",
+            "  ○ Run Installer       WAITING",
+            "  ○ Monitoring          WAITING",
+        ),
+        "launching": (
+            "  ● SSH Connection      DONE",
+            "  ● Download Script     DONE",
+            "  ◐ Run Installer       STARTING",
+            "  ○ Monitoring          WAITING",
+        ),
+        "monitoring": (
+            "  ● SSH Connection      DONE",
+            "  ● Download Script     DONE",
+            "  ● Run Installer       DONE",
+            "  ◐ Monitoring          RUNNING",
+        ),
+    }
+    rows = phase_rows.get(phase, phase_rows["queued"])
+    progress = max(0, min(100, int(progress)))
+    filled = round(progress * 18 / 100)
+    bar = "█" * filled + "░" * (18 - filled)
+    if phase == "monitoring":
+        minutes = max(0, int(elapsed_seconds / 60))
+        progress_note = f"  Progress perkiraan · {minutes} menit"
+    else:
+        progress_note = "  Progress tahapan"
+    if detail:
+        progress_note += f"\n  Status: {detail}"
+    return (
+        "─────────────────────────────\n"
+        "  ⚙️  OS Installation Service\n"
+        "─────────────────────────────\n\n"
+        f"  Job: {job['job_id']}\n"
+        f"  VPS: {job['vps_ip']}\n"
+        f"  OS: {job['os_name']}\n\n"
+        + "\n".join(rows) + "\n\n"
+        f"  ┃{bar}┃ {progress}%\n"
+        f"{progress_note}\n\n"
+        "  Reinstall berjalan di background.\n"
+        "  Anda tetap dapat memproses VPS lain.\n"
+        "─────────────────────────────"
+    )
+
+
+async def report_reinstall_stage(
+    application: Application,
+    job_id: str,
+    phase: str,
+    progress: int,
+    elapsed_seconds: int = 0,
+) -> None:
+    job = update_reinstall_job(job_id, status=phase, progress=progress)
+    if job:
+        await edit_job_progress(
+            application,
+            job_id,
+            build_install_progress_text(job, phase, progress, elapsed_seconds),
+        )
+
+
 async def edit_job_progress(application: Application, job_id: str, text: str) -> None:
     """Update the original confirmation message, falling back to a new message."""
     job = get_reinstall_job(job_id)
@@ -2334,8 +2418,14 @@ async def edit_job_progress(application: Application, job_id: str, text: str) ->
             logger.warning("Could not send progress for job %s: %s", job_id, send_exc)
 
 
-def launch_reinstall_sync(data: dict) -> tuple:
+def launch_reinstall_sync(data: dict, stage_callback=None) -> tuple:
     """Blocking SSH/download/launch work; always run this with asyncio.to_thread."""
+    def report(stage: str) -> None:
+        if stage_callback:
+            try:
+                stage_callback(stage)
+            except Exception as exc:
+                logger.warning("Could not report reinstall stage %s: %s", stage, exc)
     ssh = None
     try:
         ssh = paramiko.SSHClient()
@@ -2349,6 +2439,7 @@ def launch_reinstall_sync(data: dict) -> tuple:
             banner_timeout=20,
             auth_timeout=20,
         )
+        report("downloading")
 
         if data["os_type"] == "windows":
             script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
@@ -2383,6 +2474,7 @@ def launch_reinstall_sync(data: dict) -> tuple:
             error = stderr.read().decode(errors="replace").strip()
             return False, f"Gagal download installer (exit {rc}): {error[:300]}"
 
+        report("launching")
         launch_command = (
             "nohup sh -c " + shlex.quote(command) +
             " </dev/null >/tmp/reinstallos-installer.log 2>&1 & echo $!"
@@ -2579,24 +2671,25 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             )
             return
 
-        progress = min(95, max(25, 25 + int(elapsed / 20)))
-        update_reinstall_job(job_id, status="monitoring", progress=progress, offline_seen=offline_seen)
-        if elapsed - last_notice >= 120 or last_notice == 0:
-            phase = "VPS sedang reboot/install" if offline_seen else "Menunggu VPS masuk tahap reinstall"
+        progress = min(95, max(30, 30 + int(elapsed / 20)))
+        current = update_reinstall_job(
+            job_id,
+            status="monitoring",
+            progress=progress,
+            offline_seen=offline_seen,
+        ) or current
+        if elapsed - last_notice >= 60 or last_notice == 0:
+            phase_detail = "VPS sedang reboot/install" if offline_seen else "Menunggu VPS masuk tahap reinstall"
             await edit_job_progress(
                 application,
                 job_id,
-                "─────────────────────────────\n"
-                "  ⚙️  Reinstall Berjalan\n"
-                "─────────────────────────────\n\n"
-                f"  Job ID: {job_id}\n"
-                f"  VPS: {vps_ip}\n"
-                f"  OS: {current['os_name']}\n"
-                f"  Status: {phase}\n"
-                f"  Progress perkiraan: {progress}%\n\n"
-                "  Job berjalan di background. Anda dapat\n"
-                "  mengelola atau reinstall VPS lain.\n"
-                "─────────────────────────────",
+                build_install_progress_text(
+                    current,
+                    "monitoring",
+                    progress,
+                    elapsed_seconds=elapsed,
+                    detail=phase_detail,
+                ),
             )
             last_notice = elapsed
         await asyncio.sleep(30)
@@ -2619,24 +2712,36 @@ async def process_reinstall_job(application: Application, job_id: str, data=None
             await finish_reinstall_job(application, job_id, "failed", "Kredensial VPS tidak lagi tersedia.")
             return
 
-        update_reinstall_job(job_id, status="connecting", progress=5, started_at=int(_time.time()))
+        job = update_reinstall_job(
+            job_id,
+            status="connecting",
+            progress=5,
+            started_at=int(_time.time()),
+        ) or job
         await edit_job_progress(
             application,
             job_id,
-            "─────────────────────────────\n"
-            "  🔌  Menyiapkan Reinstall\n"
-            "─────────────────────────────\n\n"
-            f"  Job ID: {job_id}\n"
-            f"  VPS: {job['vps_ip']}\n"
-            f"  OS: {job['os_name']}\n"
-            "  Status: Menghubungkan, mengunduh, dan\n"
-            "  menjalankan installer di background...\n\n"
-            "  Telegram bot tetap dapat digunakan.\n"
-            "─────────────────────────────",
+            build_install_progress_text(job, "connecting", 5),
         )
-        update_reinstall_job(job_id, status="launching", progress=15)
+
+        loop = asyncio.get_running_loop()
+        stage_progress = {"downloading": 15, "launching": 25}
+
+        def stage_callback(stage: str) -> None:
+            progress = stage_progress.get(stage)
+            if progress is None:
+                return
+            future = asyncio.run_coroutine_threadsafe(
+                report_reinstall_stage(application, job_id, stage, progress),
+                loop,
+            )
+            try:
+                future.result(timeout=15)
+            except Exception as exc:
+                logger.warning("Progress update delayed for job %s: %s", job_id, exc)
+
         try:
-            ok, result = await asyncio.to_thread(launch_reinstall_sync, data)
+            ok, result = await asyncio.to_thread(launch_reinstall_sync, data, stage_callback)
         finally:
             # The persistent VPS bucket remains the source of truth; do not retain
             # another plaintext password in this long-lived background task.
@@ -2645,7 +2750,7 @@ async def process_reinstall_job(application: Application, job_id: str, data=None
             await finish_reinstall_job(application, job_id, "failed", result)
             return
 
-        update_reinstall_job(job_id, status="monitoring", progress=25, target_pid=result)
+        update_reinstall_job(job_id, status="monitoring", progress=30, target_pid=result)
         await monitor_reinstall_job(application, job_id)
 
 
