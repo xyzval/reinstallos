@@ -1549,9 +1549,10 @@ async def select_vps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if idx < len(vps_list):
             data = vps_list[idx]
             context.user_data.update(data)
-            await query.edit_message_text(
+            await safe_edit_query(
+                query,
                 get_vps_info_text(data) + "\n\n  Pilih aksi:",
-                reply_markup=get_action_keyboard(),
+                get_action_keyboard(),
             )
             return SELECT_VPS_ACTION
 
@@ -1634,10 +1635,12 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if action == "act_status":
         vps_ip = data["vps_ip"]
         await query.edit_message_text(f"  📡 Checking {vps_ip}...")
-        ping_ok, ssh_ok, rdp_ok = await check_vps_connectivity(vps_ip)
+        ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok = await check_vps_connectivity(vps_ip)
         keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
         await query.edit_message_text(
-            get_connectivity_status_text(vps_ip, ping_ok, ssh_ok, rdp_ok),
+            get_connectivity_status_text(
+                vps_ip, ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok
+            ),
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return SELECT_VPS_ACTION
@@ -2557,19 +2560,32 @@ async def check_vps_connectivity(vps_ip: str) -> tuple:
     ping_ok = proc.returncode == 0
     port_results = await asyncio.gather(
         is_port_open(vps_ip, 22, timeout=3),
+        is_port_open(vps_ip, 22022, timeout=3),
         is_port_open(vps_ip, 3389, timeout=3),
         return_exceptions=True,
     )
-    ssh_ok = port_results[0] is True
-    rdp_ok = port_results[1] is True
-    return ping_ok, ssh_ok, rdp_ok
+    ssh_22_ok = port_results[0] is True
+    ssh_22022_ok = port_results[1] is True
+    rdp_ok = port_results[2] is True
+    return ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok
 
 
-def get_connectivity_status_text(vps_ip: str, ping_ok: bool, ssh_ok: bool, rdp_ok: bool) -> str:
+def get_connectivity_status_text(
+    vps_ip: str,
+    ping_ok: bool,
+    ssh_22_ok: bool,
+    ssh_22022_ok: bool,
+    rdp_ok: bool,
+) -> str:
     ping_txt = "✅ ONLINE" if ping_ok else "❌ OFFLINE"
-    ssh_txt = "✅ OPEN" if ssh_ok else "❌ CLOSED"
+    ssh_22_txt = "✅ OPEN" if ssh_22_ok else "❌ CLOSED"
+    ssh_22022_txt = "✅ OPEN" if ssh_22022_ok else "❌ CLOSED"
     rdp_txt = "✅ OPEN" if rdp_ok else "❌ CLOSED"
-    overall = "✅ VPS ONLINE" if ping_ok or ssh_ok or rdp_ok else "❌ VPS OFFLINE"
+    overall = (
+        "✅ VPS ONLINE"
+        if ping_ok or ssh_22_ok or ssh_22022_ok or rdp_ok
+        else "❌ VPS OFFLINE"
+    )
     return (
         "─────────────────────────────\n"
         "  📡  VPS Status\n"
@@ -2578,7 +2594,8 @@ def get_connectivity_status_text(vps_ip: str, ping_ok: bool, ssh_ok: bool, rdp_o
         f"  {overall}\n\n"
         "─────────────────────────────\n"
         f"  🏓 Ping (ICMP): {ping_txt}\n"
-        f"  🔐 SSH 22:      {ssh_txt}\n"
+        f"  🔐 SSH 22:      {ssh_22_txt}\n"
+        f"  🔐 SSH 22022:   {ssh_22022_txt}\n"
         f"  🖥️ RDP 3389:     {rdp_txt}\n"
         "─────────────────────────────"
     )
@@ -3153,9 +3170,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     vps_ip = target_ip
     await update.message.reply_text(f"  📡 Ping {vps_ip}...")
 
-    ping_ok, ssh_ok, rdp_ok = await check_vps_connectivity(vps_ip)
+    ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok = await check_vps_connectivity(vps_ip)
     await update.message.reply_text(
-        get_connectivity_status_text(vps_ip, ping_ok, ssh_ok, rdp_ok)
+        get_connectivity_status_text(
+            vps_ip, ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok
+        )
         + "\n\n  Tip: `/ping 104.207.93.92:22022` juga bisa (auto ambil IP)",
         parse_mode="Markdown",
     )

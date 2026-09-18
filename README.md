@@ -134,7 +134,7 @@ Pass: Digicore@1
 | SSH Command | Kirim command langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime |
 | Reboot | Restart VPS dari Telegram |
-| Status Check | Tombol Status dan `/ping` sama-sama mengecek ICMP, SSH 22, dan RDP 3389 |
+| Status Check | Tombol Status dan `/ping` sama-sama mengecek ICMP, SSH 22, SSH 22022, dan RDP 3389 |
 | Open All Port | Buka firewall OS dengan konfirmasi 2 tahap, backup, dan verifikasi |
 | Edit Port | Tambah port SSH, pertahankan port lama, validasi, tes koneksi, dan rollback otomatis |
 | Edit Password | Ganti password root via SSH |
