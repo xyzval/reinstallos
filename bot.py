@@ -1634,22 +1634,10 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if action == "act_status":
         vps_ip = data["vps_ip"]
         await query.edit_message_text(f"  📡 Checking {vps_ip}...")
-        proc = await asyncio.create_subprocess_exec(
-            "ping", "-c", "3", "-W", "5", vps_ip,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.communicate()
-        if proc.returncode == 0:
-            status_text = f"  ✅ {vps_ip} ONLINE"
-        else:
-            status_text = f"  ❌ {vps_ip} OFFLINE"
+        ping_ok, ssh_ok, rdp_ok = await check_vps_connectivity(vps_ip)
         keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
         await query.edit_message_text(
-            "─────────────────────────────\n"
-            "  📡  VPS Status\n"
-            "─────────────────────────────\n\n"
-            f"{status_text}\n\n"
-            "─────────────────────────────",
+            get_connectivity_status_text(vps_ip, ping_ok, ssh_ok, rdp_ok),
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return SELECT_VPS_ACTION
@@ -2558,6 +2546,44 @@ async def is_port_open(ip: str, port: int, timeout: int = 5) -> bool:
     return await asyncio.to_thread(probe)
 
 
+async def check_vps_connectivity(vps_ip: str) -> tuple:
+    """Use one shared ICMP/SSH/RDP check for both Status and /ping."""
+    proc = await asyncio.create_subprocess_exec(
+        "ping", "-c", "3", "-W", "3", vps_ip,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    ping_ok = proc.returncode == 0
+    port_results = await asyncio.gather(
+        is_port_open(vps_ip, 22, timeout=3),
+        is_port_open(vps_ip, 3389, timeout=3),
+        return_exceptions=True,
+    )
+    ssh_ok = port_results[0] is True
+    rdp_ok = port_results[1] is True
+    return ping_ok, ssh_ok, rdp_ok
+
+
+def get_connectivity_status_text(vps_ip: str, ping_ok: bool, ssh_ok: bool, rdp_ok: bool) -> str:
+    ping_txt = "✅ ONLINE" if ping_ok else "❌ OFFLINE"
+    ssh_txt = "✅ OPEN" if ssh_ok else "❌ CLOSED"
+    rdp_txt = "✅ OPEN" if rdp_ok else "❌ CLOSED"
+    overall = "✅ VPS ONLINE" if ping_ok or ssh_ok or rdp_ok else "❌ VPS OFFLINE"
+    return (
+        "─────────────────────────────\n"
+        "  📡  VPS Status\n"
+        "─────────────────────────────\n\n"
+        f"  🎯 {vps_ip}\n"
+        f"  {overall}\n\n"
+        "─────────────────────────────\n"
+        f"  🏓 Ping (ICMP): {ping_txt}\n"
+        f"  🔐 SSH 22:      {ssh_txt}\n"
+        f"  🖥️ RDP 3389:     {rdp_txt}\n"
+        "─────────────────────────────"
+    )
+
+
 def linux_os_matches(requested_os: str, detected_os: str) -> bool:
     """Match the requested Linux family and major/version token."""
     requested = requested_os.lower()
@@ -3127,51 +3153,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     vps_ip = target_ip
     await update.message.reply_text(f"  📡 Ping {vps_ip}...")
 
-    # Cek ICMP ping
-    proc = await asyncio.create_subprocess_exec(
-        "ping", "-c", "3", "-W", "3", vps_ip,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    await proc.communicate()
-    ping_ok = proc.returncode == 0
-
-    # Cek port SSH (22) dan RDP (3389)
-    async def check_port(ip, port):
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3)
-            res = sock.connect_ex((ip, port))
-            sock.close()
-            return res == 0
-        except:
-            return False
-
-    ssh_ok, rdp_ok = await asyncio.gather(check_port(vps_ip, 22), check_port(vps_ip, 3389))
-
-    # Build status text
-    ping_txt = "✅ ONLINE" if ping_ok else "❌ OFFLINE"
-    ssh_txt = "✅ OPEN" if ssh_ok else "❌ CLOSED"
-    rdp_txt = "✅ OPEN" if rdp_ok else "❌ CLOSED"
-
-    # Kesimpulan
-    if ping_ok or ssh_ok or rdp_ok:
-        overall = "✅ VPS ONLINE"
-    else:
-        overall = "❌ VPS OFFLINE"
-
+    ping_ok, ssh_ok, rdp_ok = await check_vps_connectivity(vps_ip)
     await update.message.reply_text(
-        "─────────────────────────────\n"
-        "  📡  Ping Result\n"
-        "─────────────────────────────\n\n"
-        f"  🎯 {vps_ip}\n"
-        f"  {overall}\n\n"
-        "─────────────────────────────\n"
-        f"  🏓 Ping (ICMP): {ping_txt}\n"
-        f"  🔐 SSH 22:      {ssh_txt}\n"
-        f"  🖥️ RDP 3389:     {rdp_txt}\n"
-        "─────────────────────────────\n\n"
-        "  Tip: `/ping 104.207.93.92:22022` juga bisa (auto ambil IP)",
-        parse_mode="Markdown"
+        get_connectivity_status_text(vps_ip, ping_ok, ssh_ok, rdp_ok)
+        + "\n\n  Tip: `/ping 104.207.93.92:22022` juga bisa (auto ambil IP)",
+        parse_mode="Markdown",
     )
 
 
