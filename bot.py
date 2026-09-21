@@ -2353,64 +2353,67 @@ def build_install_progress_text(
     phase: str,
     progress: int,
     elapsed_seconds: int = 0,
-    detail: str = "",
 ) -> str:
-    """Render the familiar single-message loading UI while the job runs in background."""
+    """Render the original loading design while the persistent job runs."""
     phase_rows = {
         "queued": (
             "  ○ SSH Connection      WAITING",
             "  ○ Download Script     WAITING",
             "  ○ Run Installer       WAITING",
-            "  ○ Monitoring          WAITING",
         ),
         "connecting": (
             "  ◐ SSH Connection      CONNECTING",
             "  ○ Download Script     WAITING",
             "  ○ Run Installer       WAITING",
-            "  ○ Monitoring          WAITING",
         ),
         "downloading": (
             "  ● SSH Connection      DONE",
             "  ◐ Download Script     DOWNLOADING",
             "  ○ Run Installer       WAITING",
-            "  ○ Monitoring          WAITING",
         ),
         "launching": (
             "  ● SSH Connection      DONE",
             "  ● Download Script     DONE",
-            "  ◐ Run Installer       STARTING",
-            "  ○ Monitoring          WAITING",
+            "  ◐ Run Installer       RUNNING",
         ),
         "monitoring": (
             "  ● SSH Connection      DONE",
             "  ● Download Script     DONE",
             "  ● Run Installer       DONE",
-            "  ◐ Monitoring          RUNNING",
+            "  ◐ Installing OS       IN PROGRESS",
+            "  ○ Final Check         WAITING",
         ),
     }
     rows = phase_rows.get(phase, phase_rows["queued"])
-    progress = max(0, min(100, int(progress)))
-    filled = round(progress * 18 / 100)
+    display_progress = {
+        "queued": 0,
+        "connecting": 0,
+        "downloading": 15,
+        "launching": 30,
+    }.get(phase, progress)
+    display_progress = max(0, min(100, int(display_progress)))
+    filled = min(18, int(display_progress / 5.5))
     bar = "█" * filled + "░" * (18 - filled)
+
+    timing = ""
     if phase == "monitoring":
-        minutes = max(0, int(elapsed_seconds / 60))
-        progress_note = f"  Progress perkiraan · {minutes} menit"
-    else:
-        progress_note = "  Progress tahapan"
-    if detail:
-        progress_note += f"\n  Status: {detail}"
+        elapsed_minutes = max(0, int(elapsed_seconds / 60))
+        remaining_minutes = max(15 - elapsed_minutes, 2)
+        timing = (
+            f"\n  ⏱ Elapsed: {elapsed_minutes} min\n"
+            f"  ⏳ Remaining: ~{remaining_minutes} min\n"
+        )
+
     return (
         "─────────────────────────────\n"
         "  ⚙️  OS Installation Service\n"
         "─────────────────────────────\n\n"
-        f"  Job: {job['job_id']}\n"
-        f"  VPS: {job['vps_ip']}\n"
-        f"  OS: {job['os_name']}\n\n"
+        f"  🎯 {job['vps_ip']}\n"
+        f"  📦 {job['os_name']}\n\n"
+        "─────────────────────────────\n\n"
         + "\n".join(rows) + "\n\n"
-        f"  ┃{bar}┃ {progress}%\n"
-        f"{progress_note}\n\n"
-        "  Reinstall berjalan di background.\n"
-        "  Anda tetap dapat memproses VPS lain.\n"
+        f"  ┃{bar}┃ {display_progress}%\n"
+        f"{timing}\n"
         "─────────────────────────────"
     )
 
@@ -2695,7 +2698,10 @@ async def finish_reinstall_job(
                 "  User: Administrator\n"
                 "  Pass: Teddysun.com"
             )
-            fix_status = "  Verifikasi: RDP port 3389 READY\n"
+            result_status = (
+                "  ● RDP 3389            READY\n"
+                "  ● Final Check         VERIFIED\n"
+            )
         else:
             login = (
                 f"  Host: ssh root@{job['vps_ip']}\n"
@@ -2704,22 +2710,23 @@ async def finish_reinstall_job(
                 "  Pass: Digicore@1"
             )
             detected = verification or "Linux dan SSH siap"
-            fix_status = (
-                f"  OS terverifikasi: {detected}\n"
-                "  SSH port 22: READY\n"
-                "  Login root: READY\n"
+            result_status = (
+                f"  ● OS: {detected}\n"
+                "  ● SSH 22              READY\n"
+                "  ● Root Login          READY\n"
+                "  ● Final Check         VERIFIED\n"
             )
         text = (
             "─────────────────────────────\n"
-            "  ✅  Reinstall Selesai\n"
+            "  ✅  OS Installation Complete\n"
             "─────────────────────────────\n\n"
-            f"  Job ID: {job_id}\n"
-            f"  VPS: {job['vps_ip']}\n"
-            f"  OS: {job['os_name']}\n"
-            f"  Durasi: {elapsed_minutes} menit\n"
-            "  Progress: 100%\n"
-            f"{fix_status}\n"
-            "  LOGIN:\n"
+            f"  🎯 {job['vps_ip']}\n"
+            f"  📦 {job['os_name']}\n"
+            f"  ⏱ {elapsed_minutes} min\n\n"
+            "  ┃██████████████████┃ 100%\n"
+            f"{result_status}\n"
+            "─────────────────────────────\n\n"
+            "  🔑 LOGIN:\n"
             f"{login}\n\n"
             "─────────────────────────────"
         )
@@ -2830,7 +2837,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             )
             return
 
-        progress = min(95, max(30, 30 + int(elapsed / 20)))
+        progress = min(90, max(30, int(elapsed / 12)))
         current = update_reinstall_job(
             job_id,
             status="monitoring",
@@ -2838,13 +2845,6 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             offline_seen=offline_seen,
         ) or current
         if elapsed - last_notice >= 60 or last_notice == 0:
-            if ready_for_verification:
-                target_name = "RDP Windows" if current.get("os_type") == "windows" else "OS Linux dan SSH"
-                phase_detail = f"VPS online, menunggu verifikasi {target_name}"
-            elif offline_seen:
-                phase_detail = "VPS sedang reboot/install"
-            else:
-                phase_detail = "Menunggu VPS masuk tahap reinstall"
             await edit_job_progress(
                 application,
                 job_id,
@@ -2853,7 +2853,6 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     "monitoring",
                     progress,
                     elapsed_seconds=elapsed,
-                    detail=phase_detail,
                 ),
             )
             last_notice = elapsed

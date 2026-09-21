@@ -139,7 +139,7 @@ Pass: Digicore@1
 | Edit Port | Tambah port SSH, pertahankan port lama, validasi, tes koneksi, dan rollback otomatis |
 | Edit Password | Ganti password root via SSH |
 | Auto-fix Password | Otomatis fix root password setelah install Linux |
-| Loading UI | Animasi tahapan SSH/download/launch dan progress monitoring perkiraan dalam satu pesan |
+| Loading UI | Tampilan klasik SSH/download/run/install/final-check dalam satu pesan, didukung Jobs persisten |
 | Verifikasi Hasil | Linux diverifikasi melalui SSH dan `/etc/os-release`; Windows ditunggu sampai RDP port 3389 siap |
 | Keamanan | Password auto-dihapus dari chat |
 
