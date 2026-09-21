@@ -704,6 +704,54 @@ async def handle_jobs_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await safe_edit_query(query, get_job_detail_text(job), get_job_detail_keyboard(job))
 
 
+GLOBAL_NAVIGATION_PATTERN = r"^(selvps_|addvps$|add_|act_|cat_|os_|lang_|owner_)"
+
+
+async def handle_global_navigation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Let important inline buttons re-enter/reset a stale conversation safely."""
+    query = update.callback_query
+    action = query.data or ""
+
+    if action.startswith("owner_"):
+        return await owner_callback(update, context)
+    if action.startswith(("selvps_", "addvps", "add_")):
+        return await select_vps(update, context)
+
+    # Action/OS buttons from an old message need a selected VPS. After a bot
+    # restart user_data can be empty, so show the VPS list instead of ignoring it.
+    if not context.user_data.get("vps_ip"):
+        await query.answer("Sesi lama dimuat ulang. Silakan pilih VPS.", show_alert=False)
+        await safe_edit_query(
+            query,
+            "─────────────────────────────\n"
+            "  🖥️  Reinstall OS Bot\n"
+            "─────────────────────────────\n\n"
+            "  Pilih VPS untuk melanjutkan:",
+            get_vps_list_keyboard(update.effective_user.id),
+        )
+        return SELECT_VPS_ACTION
+
+    if action.startswith("act_"):
+        return await handle_action(update, context)
+    if action.startswith("cat_"):
+        return await select_os_category(update, context)
+    if action.startswith("os_"):
+        return await select_os(update, context)
+    if action.startswith("lang_"):
+        return await select_lang(update, context)
+    return SELECT_VPS_ACTION
+
+
+async def handle_stale_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Never leave a click spinning silently when its old conversation has ended."""
+    query = update.callback_query
+    if (query.data or "").startswith("confirm_"):
+        text = "Konfirmasi ini sudah kedaluwarsa. Pilih Reinstall lagi dari menu VPS."
+    else:
+        text = "Tombol lama sudah kedaluwarsa. Pilih VPS atau buka /start."
+    await query.answer(text, show_alert=True)
+
+
 # ============ Owner User Management UI ============
 
 def get_owner_users_text() -> str:
@@ -3514,7 +3562,13 @@ def main() -> None:
     )
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CallbackQueryHandler(
+                handle_global_navigation,
+                pattern=GLOBAL_NAVIGATION_PATTERN,
+            ),
+        ],
         states={
             ADD_VPS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_vps_handler),
@@ -3581,6 +3635,8 @@ def main() -> None:
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("jobs", jobs_command))
     app.add_handler(CallbackQueryHandler(handle_jobs_callback, pattern="^jobs_"))
+    # Final callback fallback: old/expired buttons get an explanation, never silence.
+    app.add_handler(CallbackQueryHandler(handle_stale_callback))
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("ssh", cmd_ssh))
     app.add_handler(CommandHandler("reboot", cmd_reboot))

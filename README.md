@@ -140,6 +140,7 @@ Pass: Digicore@1
 | Edit Password | Ganti password root via SSH |
 | Auto-fix Password | Otomatis fix root password setelah install Linux |
 | Loading UI | Tampilan klasik SSH/download/run/install/final-check dalam satu pesan, didukung Jobs persisten |
+| Tombol Tahan Restart | Tombol menu/VPS/aksi dapat memulihkan sesi lama tanpa mewajibkan `/start` |
 | Verifikasi Hasil | Linux diverifikasi melalui SSH dan `/etc/os-release`; Windows ditunggu sampai RDP port 3389 siap |
 | Keamanan | Password auto-dihapus dari chat |
 
