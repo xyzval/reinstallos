@@ -14,10 +14,15 @@ import os
 import json
 import logging
 import asyncio
+import base64
+import hashlib
 import re
 import socket
+import subprocess
+import threading
 import time as _time
 import shlex
+import urllib.request
 import uuid
 import paramiko
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
@@ -73,26 +78,58 @@ MAX_QUEUED_REINSTALL_JOBS = max(1, int(os.getenv("MAX_QUEUED_REINSTALL_JOBS", "2
 ) = range(15)
 
 
-# OS Options
+# OS options.  One engine is deliberately used for every target because it can
+# prepare a reinstall from either Linux (reinstall.sh) or Windows
+# (reinstall.bat).  Keeping a single command grammar is also safer for restart
+# recovery than choosing an engine from the current OS.
 WINDOWS_OPTIONS = {
-    "win10": {"name": "Windows 10", "cmd": '-windows 10'},
-    "win11": {"name": "Windows 11", "cmd": '-windows 11'},
-    "ws2012": {"name": "Windows Server 2012 R2", "cmd": '-windows 2012'},
-    "ws2016": {"name": "Windows Server 2016", "cmd": '-windows 2016'},
-    "ws2019": {"name": "Windows Server 2019", "cmd": '-windows 2019'},
-    "ws2022": {"name": "Windows Server 2022", "cmd": '-windows 2022'},
+    "win10": {"name": "Windows 10", "cmd": 'windows --image-name "Windows 10 Pro"'},
+    "win11": {"name": "Windows 11", "cmd": 'windows --image-name "Windows 11 Pro"'},
+    "ws2012": {"name": "Windows Server 2012 R2", "cmd": 'windows --image-name "Windows Server 2012 R2 ServerStandard"'},
+    "ws2016": {"name": "Windows Server 2016", "cmd": 'windows --image-name "Windows Server 2016 ServerStandard"'},
+    "ws2019": {"name": "Windows Server 2019", "cmd": 'windows --image-name "Windows Server 2019 ServerStandard"'},
+    # The pinned DD images avoid the frequently expiring/throttled ISO-search URL.
+    # bin456789 still mounts and modifies the final Windows volume, so our
+    # OpenSSH/RDP provisioning hook is applied exactly as with ISO installs.
+    "ws2022": {"name": "Windows Server 2022", "cmd": "dd --img __WIN2022_DD__"},
 }
 
 LINUX_OPTIONS = {
-    "debian12": {"name": "Debian 12", "cmd": '-debian 12', "engine": "leitbogioro"},
-    "debian11": {"name": "Debian 11", "cmd": '-debian 11', "engine": "leitbogioro"},
-    "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": 'ubuntu 22.04', "engine": "bin456789"},
-    "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": 'ubuntu 20.04', "engine": "bin456789"},
-    "centos9": {"name": "CentOS 9 Stream", "cmd": '-centos 9', "engine": "leitbogioro"},
-    "alma9": {"name": "AlmaLinux 9", "cmd": '-almalinux 9', "engine": "leitbogioro"},
+    "debian12": {"name": "Debian 12", "cmd": "debian 12", "engine": "bin456789"},
+    "debian11": {"name": "Debian 11", "cmd": "debian 11", "engine": "bin456789"},
+    "ubuntu2204": {"name": "Ubuntu 22.04", "cmd": "ubuntu 22.04", "engine": "bin456789"},
+    "ubuntu2004": {"name": "Ubuntu 20.04", "cmd": "ubuntu 20.04", "engine": "bin456789"},
+    "centos9": {"name": "CentOS 9 Stream", "cmd": "centos 9", "engine": "bin456789"},
+    "alma9": {"name": "AlmaLinux 9", "cmd": "almalinux 9", "engine": "bin456789"},
 }
 
 LANG_OPTIONS = {"en": "English", "cn": "Chinese", "jp": "Japanese"}
+
+REINSTALL_SH_URL = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
+REINSTALL_BAT_URL = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.bat"
+CYGWIN_SETUP_URL = "https://www.cygwin.com/setup-x86_64.exe"
+WINDOWS_OPENSSH_URL = (
+    "https://github.com/PowerShell/Win32-OpenSSH/releases/download/"
+    "v9.5.0.0p1-Beta/OpenSSH-Win64.zip"
+)
+WINDOWS_OPENSSH_SHA256 = "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c"
+WINDOWS_2022_DD_IMAGES = {
+    "en": "https://dl.lamp.sh/vhd/en-us_win2022.xz",
+    "en-us": "https://dl.lamp.sh/vhd/en-us_win2022.xz",
+    "cn": "https://dl.lamp.sh/vhd/zh-cn_win2022.xz",
+    "zh-cn": "https://dl.lamp.sh/vhd/zh-cn_win2022.xz",
+    "jp": "https://dl.lamp.sh/vhd/ja-jp_win2022.xz",
+    "ja": "https://dl.lamp.sh/vhd/ja-jp_win2022.xz",
+    "ja-jp": "https://dl.lamp.sh/vhd/ja-jp_win2022.xz",
+}
+LINUX_INSTALL_USER = "root"
+LINUX_INSTALL_PASSWORD = "Digicore@1"
+WINDOWS_INSTALL_USER = "Administrator"
+WINDOWS_INSTALL_PASSWORD = "Teddysun.com"
+PRIMARY_SSH_PORT = 22022
+FALLBACK_SSH_PORT = 22
+_ASSET_CACHE = {}
+_ASSET_CACHE_LOCK = threading.Lock()
 
 
 
@@ -636,9 +673,18 @@ def get_job_detail_text(job: dict) -> str:
             lines.append(f"  Verifikasi: {str(job['verification'])[:200]}")
     if job.get("status") == "completed":
         if job.get("os_type") == "linux":
-            lines.extend(["  SSH port 22: READY", "  Login root: READY"])
+            lines.extend([
+                "  SSH port 22022: READY",
+                "  SSH port 22: READY",
+                "  Login root: READY",
+            ])
         else:
-            lines.append("  RDP port 3389: READY")
+            lines.extend([
+                "  SSH port 22022: READY",
+                "  SSH port 22: READY",
+                "  Login Administrator: READY",
+                "  RDP port 3389: READY",
+            ])
     if job.get("error"):
         lines.extend(["", f"  Pesan: {str(job['error'])[:500]}"])
     lines.extend(["", "─────────────────────────────"])
@@ -1652,7 +1698,8 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         await query.edit_message_text(
             get_vps_info_text(data) + "\n\n"
             "  💻 Kirim command SSH:\n\n"
-            "  Contoh: `uptime` atau `df -h`\n\n"
+            "  Linux memakai Bash; Windows memakai PowerShell.\n"
+            "  Contoh: `uptime`, `df -h`, atau `Get-Service`.\n\n"
             "  Atau klik Kembali untuk menu.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1667,7 +1714,11 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         return SELECT_VPS_ACTION
 
     if action == "act_reboot":
-        result = await ssh_exec(data, "reboot")
+        await ssh_exec_for_os(
+            data,
+            "reboot",
+            "Restart-Computer -Force",
+        )
         await query.edit_message_text(
             "─────────────────────────────\n"
             "  🔄  VPS Rebooting\n"
@@ -1859,7 +1910,23 @@ if [ -n "$FAILURES" ]; then
 fi
 echo "OPENPORT_DONE"
 '''
-        result = await ssh_exec(data, openport_cmd)
+        openport_windows_ps = r'''
+$ErrorActionPreference = 'Stop'
+$backup = "C:\ProgramData\ReinstallOS\firewall-$(Get-Date -Format yyyyMMdd-HHmmss)"
+New-Item -ItemType Directory -Force -Path $backup | Out-Null
+Get-NetFirewallProfile | Format-List * | Out-File "$backup\profiles.txt"
+Get-NetFirewallRule | Export-Clixml "$backup\rules.xml"
+Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False
+if ((Get-NetFirewallProfile | Where-Object Enabled).Count -ne 0) {
+    throw 'Windows Firewall masih aktif'
+}
+Write-Output "BACKUP_DIR:$backup"
+Write-Output 'OPENPORT_WARNINGS:none'
+Write-Output 'OPENPORT_DONE'
+'''
+        result, _, _, _, _ = await ssh_exec_for_os(
+            data, openport_cmd, openport_windows_ps
+        )
         keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
         if "OPENPORT_DONE" in result:
             backup_line = next((ln for ln in result.splitlines() if ln.startswith("BACKUP_DIR:")), "BACKUP_DIR:-")
@@ -1948,26 +2015,42 @@ async def edit_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await update.message.reply_text(f"⏳ Mengubah password VPS {data['vps_ip']}...")
 
-    # Change password via SSH
-    change_cmd = (
-        f"echo 'root:{new_pass}' | chpasswd 2>/dev/null && "
-        f"echo '{data['vps_user']}:{new_pass}' | chpasswd 2>/dev/null && "
-        "echo 'PASS_CHANGED'"
+    # Change the platform's managed login without exposing the password in a
+    # process argument on Linux. PowerShell is sent through EncodedCommand.
+    linux_change_cmd = (
+        f"printf '%s\\n' {shlex.quote('root:' + new_pass)} | chpasswd && "
+        "printf 'PASS_CHANGED\\n'"
     )
-    result = await ssh_exec(data, change_cmd)
+    ps_password = new_pass.replace("'", "''")
+    windows_change_ps = (
+        f"$u=[ADSI]'WinNT://./{WINDOWS_INSTALL_USER},user'; "
+        f"$u.SetPassword('{ps_password}'); "
+        "Write-Output 'PASS_CHANGED'"
+    )
+    result, detected_os, connected_port, connected_user, _ = await ssh_exec_for_os(
+        data, linux_change_cmd, windows_change_ps
+    )
 
     if "PASS_CHANGED" in result:
         # Update saved VPS data
-        old_pass = data['vps_pass']
+        old_port = int(data.get('vps_port', FALLBACK_SSH_PORT))
         data['vps_pass'] = new_pass
-        context.user_data['vps_pass'] = new_pass
+        data['vps_user'] = WINDOWS_INSTALL_USER if detected_os == "windows" else LINUX_INSTALL_USER
+        data['vps_port'] = connected_port or old_port
+        context.user_data.update({
+            'vps_pass': new_pass,
+            'vps_user': data['vps_user'],
+            'vps_port': data['vps_port'],
+        })
 
-        # Update in JSON file
+        # Update only this user's matching VPS record.
         user_id = update.effective_user.id
         vps_list = load_vps_list(user_id)
         for v in vps_list:
-            if v['vps_ip'] == data['vps_ip'] and v['vps_port'] == data['vps_port']:
+            if v['vps_ip'] == data['vps_ip'] and int(v.get('vps_port', 22)) == old_port:
                 v['vps_pass'] = new_pass
+                v['vps_user'] = data['vps_user']
+                v['vps_port'] = data['vps_port']
                 break
         save_vps_list(user_id, vps_list)
 
@@ -2196,7 +2279,52 @@ printf 'BACKUP_DIR:%s\n' "$BACKUP_DIR"
 printf 'PORTS_NOW:%s\n' "$(sshd -T 2>/dev/null | awk '$1 == "port" {{print $2}}' | sort -nu | tr '\n' ' ')"
 echo "PORT_CONFIGURED"
 '''
-    result = await ssh_exec(data, cmd)
+    windows_port_ps = f'''
+$ErrorActionPreference = 'Stop'
+$newPort = {new_port}
+$oldPort = {cur_port}
+$configDir = 'C:\\ProgramData\\ssh'
+$config = Join-Path $configDir 'sshd_config'
+if (-not (Test-Path $config)) {{ throw 'sshd_config tidak ditemukan' }}
+$backupDir = "C:\\ProgramData\\ReinstallOS\\ssh-port-$(Get-Date -Format yyyyMMdd-HHmmss)"
+New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+Copy-Item $config (Join-Path $backupDir 'sshd_config') -Force
+$lines = @(Get-Content $config)
+$activePorts = @($lines | ForEach-Object {{
+    if ($_ -match '^\\s*Port\\s+(\\d+)') {{ [int]$Matches[1] }}
+}})
+if ($activePorts.Count -eq 0) {{ $activePorts = @(22) }}
+$ports = @($activePorts + $oldPort + $newPort | Sort-Object -Unique)
+$filtered = @($lines | Where-Object {{ $_ -notmatch '^\\s*Port\\s+' }})
+@($ports | ForEach-Object {{ "Port $_" }}) + $filtered |
+    Set-Content -Path $config -Encoding ascii
+$sshd = (Get-Command sshd.exe -ErrorAction SilentlyContinue).Source
+if (-not $sshd) {{ $sshd = 'C:\\Program Files\\OpenSSH-Win64\\sshd.exe' }}
+& $sshd -t -f $config
+if ($LASTEXITCODE -ne 0) {{
+    Copy-Item (Join-Path $backupDir 'sshd_config') $config -Force
+    throw 'sshd -t gagal; konfigurasi dipulihkan'
+}}
+foreach ($port in $ports) {{
+    $name = "ReinstallOS-SSH-$port"
+    Remove-NetFirewallRule -Name $name -ErrorAction SilentlyContinue
+    New-NetFirewallRule -Name $name -DisplayName $name -Enabled True `
+        -Direction Inbound -Protocol TCP -Action Allow -LocalPort $port | Out-Null
+}}
+Restart-Service sshd -Force
+Start-Sleep -Seconds 2
+$listening = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty LocalPort
+if ($oldPort -notin $listening -or $newPort -notin $listening) {{
+    Copy-Item (Join-Path $backupDir 'sshd_config') $config -Force
+    Restart-Service sshd -Force
+    throw 'port lama/baru tidak listening; konfigurasi dipulihkan'
+}}
+Write-Output "BACKUP_DIR:$backupDir"
+Write-Output "PORTS_NOW:$($ports -join ' ')"
+Write-Output 'PORT_CONFIGURED'
+'''
+    result, detected_os, _, _, _ = await ssh_exec_for_os(data, cmd, windows_port_ps)
     keyboard = [[InlineKeyboardButton("◀️ Menu", callback_data="act_back_menu")]]
 
     if "PORT_CONFIGURED" not in result:
@@ -2212,11 +2340,10 @@ echo "PORT_CONFIGURED"
         )
         return SELECT_VPS_ACTION
 
-    # Verify from the bot host, not only from inside the target VPS.
-    test_data = dict(data)
-    test_data["vps_port"] = new_port
-    test = await ssh_exec(test_data, "printf REINSTALLOS_PORT_TEST_OK")
-    test_ok = "REINSTALLOS_PORT_TEST_OK" in test
+    # Verify the exact new endpoint from the bot host (never accept fallback).
+    test_ok, test_os, test_user, test_error = await asyncio.to_thread(
+        verify_exact_ssh_port_sync, data, new_port
+    )
     ports_line = next((ln for ln in result.splitlines() if ln.startswith("PORTS_NOW:")), "PORTS_NOW:-")
     backup_line = next((ln for ln in result.splitlines() if ln.startswith("BACKUP_DIR:")), "BACKUP_DIR:-")
 
@@ -2267,49 +2394,89 @@ echo "PORT_CONFIGURED"
 
 # ============ SSH Helpers ============
 
-async def ssh_exec(data: dict, cmd: str) -> str:
-    """Execute SSH command and return output."""
+def ssh_exec_auto_sync(data: dict, linux_cmd: str, windows_ps: str = None) -> tuple:
+    """Run Bash on Linux or encoded PowerShell on Windows after OS detection."""
+    ssh = None
     try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            hostname=data["vps_ip"], port=data["vps_port"],
-            username=data["vps_user"], password=data["vps_pass"],
-            timeout=15, allow_agent=False, look_for_keys=False,
-        )
-        stdin, stdout, stderr = ssh.exec_command(cmd)
-        stdout.channel.settimeout(30)
-        output = stdout.read().decode('utf-8', errors='ignore').strip()
-        error = stderr.read().decode('utf-8', errors='ignore').strip()
-        ssh.close()
-        return output if output else error if error else "(no output)"
-    except Exception as e:
-        return f"Error: {str(e)}"
+        ssh, remote_os, port, username = connect_target_sync(data)
+        if remote_os == "windows":
+            command = _powershell_encoded(windows_ps if windows_ps is not None else linux_cmd)
+        else:
+            command = linux_cmd
+        _, stdout, stderr = ssh.exec_command(command, timeout=60)
+        rc, output, error = _read_ssh_streams(stdout, stderr)
+        result = output if output else error if error else "(no output)"
+        if rc != 0 and error and error not in result:
+            result = f"{result}\n{error}".strip()
+        return result, remote_os, port, username, rc
+    except Exception as exc:
+        return f"Error: {str(exc)}", "", 0, "", 1
+    finally:
+        if ssh:
+            try:
+                ssh.close()
+            except Exception:
+                pass
+
+
+async def ssh_exec(data: dict, cmd: str) -> str:
+    """Execute a user command with Bash on Linux or PowerShell on Windows."""
+    result, _, _, _, _ = await asyncio.to_thread(ssh_exec_auto_sync, data, cmd, None)
+    return result
+
+
+async def ssh_exec_for_os(data: dict, linux_cmd: str, windows_ps: str) -> tuple:
+    """Execute explicit platform-specific commands and return output plus detected OS."""
+    result, remote_os, port, username, rc = await asyncio.to_thread(
+        ssh_exec_auto_sync, data, linux_cmd, windows_ps
+    )
+    return result, remote_os, port, username, rc
 
 
 async def get_vps_system_info(data: dict) -> str:
-    """Get VPS system info via SSH."""
-    info_cmd = (
-        "echo \"OS: $(cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'\"' -f2)\";"
+    """Get system information using the detected platform's native shell."""
+    linux_info = (
+        "echo \"OS: $(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d'\\\"' -f2)\";"
         "echo \"Kernel: $(uname -r)\";"
         "echo \"Uptime: $(uptime -p 2>/dev/null || uptime)\";"
         "echo \"CPU: $(nproc) cores\";"
-        "echo \"RAM: $(free -m | awk '/Mem:/ {printf \"%dMB / %dMB (%.0f%%)\", $3, $2, $3/$2*100}')\";"
-        "echo \"Disk: $(df -h / | awk 'NR==2 {printf \"%s / %s (%s)\", $3, $2, $5}')\";"
-        "echo \"Load: $(cat /proc/loadavg | awk '{print $1, $2, $3}')\""
+        "echo \"RAM: $(free -m | awk '/Mem:/ {printf \\\"%dMB / %dMB (%.0f%%)\\\", $3, $2, $3/$2*100}')\";"
+        "echo \"Disk: $(df -h / | awk 'NR==2 {printf \\\"%s / %s (%s)\\\", $3, $2, $5}')\";"
+        "echo \"Load: $(awk '{print $1, $2, $3}' /proc/loadavg)\""
     )
-    result = await ssh_exec(data, info_cmd)
+    windows_info = r'''
+$os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+if (-not $os) { $os = Get-WmiObject Win32_OperatingSystem }
+$cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+if (-not $cs) { $cs = Get-WmiObject Win32_ComputerSystem }
+$cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
+if (-not $cpu) { $cpu = Get-WmiObject Win32_Processor }
+$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
+if (-not $disk) { $disk = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'" }
+$uptime = (Get-Date) - $os.LastBootUpTime
+Write-Output "OS: $($os.Caption)"
+Write-Output "Kernel: $($os.Version) build $($os.BuildNumber)"
+Write-Output "Uptime: $([int]$uptime.TotalDays)d $($uptime.Hours)h $($uptime.Minutes)m"
+Write-Output "CPU: $(($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum) cores"
+Write-Output "RAM: $([math]::Round(($cs.TotalPhysicalMemory-$os.FreePhysicalMemory*1KB)/1GB,1))GB / $([math]::Round($cs.TotalPhysicalMemory/1GB,1))GB"
+Write-Output "Disk C: $([math]::Round(($disk.Size-$disk.FreeSpace)/1GB,1))GB / $([math]::Round($disk.Size/1GB,1))GB"
+'''
+    result, remote_os, port, username, _ = await ssh_exec_for_os(
+        data, linux_info, windows_info
+    )
+    platform = "Windows / PowerShell" if remote_os == "windows" else "Linux / Bash" if remote_os == "linux" else "Tidak terdeteksi"
+    endpoint = f"{data['vps_ip']}:{port or data.get('vps_port')}"
     return (
         "─────────────────────────────\n"
         "  📊  VPS System Info\n"
         "─────────────────────────────\n\n"
-        f"  🎯 {data['vps_ip']}:{data['vps_port']}\n\n"
+        f"  🎯 {endpoint}\n"
+        f"  🧭 {platform}\n"
+        f"  👤 {username or data.get('vps_user', '-')}\n\n"
         "─────────────────────────────\n\n"
         f"{result}\n\n"
         "─────────────────────────────"
     )
-
-
 
 # ============ OS Install Flow ============
 
@@ -2347,6 +2514,7 @@ async def select_os(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         context.user_data["os_name"] = WINDOWS_OPTIONS[os_key]["name"]
         context.user_data["os_cmd"] = WINDOWS_OPTIONS[os_key]["cmd"]
         context.user_data["os_type"] = "windows"
+        context.user_data["os_engine"] = "bin456789"
         keyboard = [[InlineKeyboardButton(v, callback_data=f"lang_{k}")] for k, v in LANG_OPTIONS.items()]
         await query.edit_message_text(f"OS: {context.user_data['os_name']}\n\nPilih bahasa:", reply_markup=InlineKeyboardMarkup(keyboard))
         return SELECT_LANG
@@ -2382,9 +2550,16 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     if data.get("lang"):
         summary += f"  🌐 {LANG_OPTIONS.get(data['lang'], '')}\n"
     if os_type == "windows":
-        summary += "\n  🔑 Login: Administrator / Teddysun.com\n"
+        summary += (
+            "\n  🔑 Login: Administrator / Teddysun.com\n"
+            "  🔐 SSH: 22022 (utama) + 22\n"
+            "  🖥️ RDP: 3389\n"
+        )
     else:
-        summary += "\n  🔑 Login: root / Digicore@1\n"
+        summary += (
+            "\n  🔑 Login: root / Digicore@1\n"
+            "  🔐 SSH: 22022 (utama) + 22\n"
+        )
     summary += "\n  ⚠️ SEMUA DATA AKAN DIHAPUS!\n"
 
     keyboard = [
@@ -2446,7 +2621,8 @@ def build_install_progress_text(
     timing = ""
     if phase == "monitoring":
         elapsed_minutes = max(0, int(elapsed_seconds / 60))
-        remaining_minutes = max(15 - elapsed_minutes, 2)
+        expected_minutes = 45 if job.get("os_type") == "windows" else 20
+        remaining_minutes = max(expected_minutes - elapsed_minutes, 2)
         timing = (
             f"\n  ⏱ Elapsed: {elapsed_minutes} min\n"
             f"  ⏳ Remaining: ~{remaining_minutes} min\n"
@@ -2512,73 +2688,450 @@ async def edit_job_progress(application: Application, job_id: str, text: str) ->
             logger.warning("Could not send progress for job %s: %s", job_id, send_exc)
 
 
+def _download_asset(url: str, expected_sha256: str = "", max_bytes: int = 8 * 1024 * 1024) -> bytes:
+    """Download a small pinned installer asset and cache it in memory."""
+    cache_key = (url, expected_sha256)
+    with _ASSET_CACHE_LOCK:
+        cached = _ASSET_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    request = urllib.request.Request(url, headers={"User-Agent": "reinstallos-bot/2"})
+    with urllib.request.urlopen(request, timeout=45) as response:
+        data = response.read(max_bytes + 1)
+    if not data or len(data) > max_bytes:
+        raise RuntimeError(f"Installer asset tidak valid/terlalu besar: {url}")
+    digest = hashlib.sha256(data).hexdigest()
+    if expected_sha256 and digest.lower() != expected_sha256.lower():
+        raise RuntimeError(f"Checksum installer asset tidak sesuai: {url}")
+    with _ASSET_CACHE_LOCK:
+        _ASSET_CACHE[cache_key] = data
+    return data
+
+
+def _windows_openssh_trans_snippet() -> str:
+    """Code inserted into upstream trans.sh's modify_windows function."""
+    return r'''
+    # ReinstallOS: provision final Windows OpenSSH without relying on first-boot downloads.
+    if [ -f /configs/windows-openssh.zip ]; then
+        rm -rf "$os_dir/Program Files/OpenSSH-Win64"
+        mkdir -p "$os_dir/Program Files"
+        unzip -o /configs/windows-openssh.zip -d "$os_dir/Program Files"
+
+        cat >"$os_dir/windows-enable-openssh.ps1" <<'REINSTALLOS_PS1'
+$ErrorActionPreference = 'Stop'
+$InstallDir = 'C:\Program Files\OpenSSH-Win64'
+$ConfigDir = 'C:\ProgramData\ssh'
+$LogFile = 'C:\reinstallos-openssh.log'
+try {
+    "$(Get-Date -Format o) configuring OpenSSH" | Out-File -FilePath $LogFile -Append -Encoding ascii
+    if (-not (Test-Path "$InstallDir\sshd.exe")) { throw 'Bundled sshd.exe is missing' }
+
+    $service = Get-Service -Name sshd -ErrorAction SilentlyContinue
+    if (-not $service) {
+        Push-Location $InstallDir
+        try {
+            & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$InstallDir\install-sshd.ps1"
+            if ($LASTEXITCODE -ne 0) { throw "install-sshd.ps1 exit $LASTEXITCODE" }
+        } finally {
+            Pop-Location
+        }
+    }
+
+    New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
+    $config = Join-Path $ConfigDir 'sshd_config'
+    if (-not (Test-Path $config)) {
+        Copy-Item "$InstallDir\sshd_config_default" $config -Force
+    }
+    $filtered = @(Get-Content $config | Where-Object {
+        $_ -notmatch '^\s*Port\s+' -and $_ -notmatch '^\s*PasswordAuthentication\s+'
+    })
+    @(
+        'Port 22022'
+        'Port 22'
+        'PasswordAuthentication yes'
+    ) + $filtered | Set-Content -Path $config -Encoding ascii
+
+    New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' -Force | Out-Null
+    New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell `
+        -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
+        -PropertyType String -Force | Out-Null
+
+    foreach ($rule in @(
+        @{Name='ReinstallOS-SSH-22'; Port=22},
+        @{Name='ReinstallOS-SSH-22022'; Port=22022},
+        @{Name='ReinstallOS-RDP-3389'; Port=3389}
+    )) {
+        Remove-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
+        New-NetFirewallRule -Name $rule.Name -DisplayName $rule.Name -Enabled True `
+            -Direction Inbound -Protocol TCP -Action Allow -LocalPort $rule.Port | Out-Null
+    }
+
+    Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' `
+        -Name fDenyTSConnections -Type DWord -Value 0
+    Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name TermService -ErrorAction SilentlyContinue
+    Set-Service -Name sshd -StartupType Automatic
+    Restart-Service -Name sshd -Force
+    Start-Sleep -Seconds 3
+
+    $listening = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty LocalPort
+    if (22 -notin $listening -or 22022 -notin $listening) {
+        throw "sshd is not listening on both ports; listening=$($listening -join ',')"
+    }
+    schtasks.exe /Delete /TN ReinstallOS-OpenSSH /F 2>$null | Out-Null
+    "$(Get-Date -Format o) OPENSSH_READY ports=22,22022 rdp=3389" |
+        Out-File -FilePath $LogFile -Append -Encoding ascii
+    exit 0
+} catch {
+    "$(Get-Date -Format o) OPENSSH_ERROR $($_.Exception.Message)" |
+        Out-File -FilePath $LogFile -Append -Encoding ascii
+    exit 1
+}
+REINSTALLOS_PS1
+
+        cat >"$os_dir/windows-enable-openssh.cmd" <<'REINSTALLOS_CMD'
+@echo off
+schtasks.exe /Create /TN ReinstallOS-OpenSSH /SC ONSTART /RU SYSTEM /RL HIGHEST /F /TR "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\windows-enable-openssh.ps1" >>C:\reinstallos-openssh.log 2>&1
+powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\windows-enable-openssh.ps1 >NUL 2>&1
+rem Never block Windows Setup: the startup task retries automatically on failure.
+exit /b 0
+REINSTALLOS_CMD
+        unix2dos "$os_dir/windows-enable-openssh.ps1" "$os_dir/windows-enable-openssh.cmd"
+        bats="$bats windows-enable-openssh.cmd"
+    else
+        error_and_exit "Missing /configs/windows-openssh.zip"
+    fi
+'''.strip("\n")
+
+
+def build_patched_reinstall_script(upstream: bytes) -> bytes:
+    """Inject a pinned OpenSSH payload hook before upstream rebuilds its initrd."""
+    text = upstream.decode("utf-8")
+    needle = "    chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh\n"
+    if text.count(needle) != 1:
+        raise RuntimeError("Format reinstall.sh upstream berubah; patch Windows dibatalkan dengan aman")
+
+    snippet_b64 = base64.b64encode(_windows_openssh_trans_snippet().encode()).decode()
+    hook = rf'''
+
+    # ReinstallOS: bundle and inject final-Windows OpenSSH before initrd repacking.
+    if [ "$distro" = windows ]; then
+        openssh_bundle="$(dirname "$THIS_SCRIPT")/reinstallos-openssh.zip"
+        [ -s "$openssh_bundle" ] || error_and_exit "Missing $openssh_bundle"
+        openssh_sha=$(openssl dgst -sha256 "$openssh_bundle" | awk '{{print $NF}}')
+        [ "$openssh_sha" = "{WINDOWS_OPENSSH_SHA256}" ] || error_and_exit "Invalid OpenSSH bundle checksum"
+        mkdir -p "$initrd_dir/configs"
+        cp -f "$openssh_bundle" "$initrd_dir/configs/windows-openssh.zip"
+        snippet_file="$tmp/reinstallos-windows-openssh.snippet"
+        printf '%s' '{snippet_b64}' | openssl base64 -d -A >"$snippet_file"
+        awk -v snippet="$snippet_file" '
+            {{ print }}
+            /^    bats=$/ && !inserted {{
+                while ((getline line < snippet) > 0) print line
+                close(snippet)
+                inserted=1
+            }}
+            END {{ if (!inserted) exit 42 }}
+        ' "$initrd_dir/trans.sh" >"$initrd_dir/trans.sh.reinstallos"
+        mv "$initrd_dir/trans.sh.reinstallos" "$initrd_dir/trans.sh"
+        chmod a+x "$initrd_dir/trans.sh"
+        grep -q 'ReinstallOS: provision final Windows OpenSSH' "$initrd_dir/trans.sh" || \
+            error_and_exit "Could not inject Windows OpenSSH provisioning"
+    fi
+'''
+    return text.replace(needle, needle + hook, 1).encode("utf-8")
+
+
+def build_patched_reinstall_batch(upstream: bytes) -> bytes:
+    """Add a non-interactive download path that also works in scheduled tasks."""
+    text = upstream.decode("utf-8-sig")
+    needle = 'certutil -urlcache -f -split "%~1" "%~2" >nul'
+    if text.count(needle) != 1:
+        raise RuntimeError("Format reinstall.bat upstream berubah; patch Windows dibatalkan dengan aman")
+    fallback = (
+        'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass '
+        '-Command "(New-Object Net.WebClient).DownloadFile(\'%~1\',\'%~2\')" >nul 2>&1\r\n'
+        'if not errorlevel 1 if exist "%~2" exit /b 0\r\n\r\n'
+        + needle
+    )
+    return text.replace(needle, fallback, 1).encode("utf-8")
+
+
+def _powershell_encoded(script: str) -> str:
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    return (
+        "powershell.exe -NoLogo -NoProfile -NonInteractive "
+        f"-ExecutionPolicy Bypass -EncodedCommand {encoded}"
+    )
+
+
+def _read_ssh_streams(stdout, stderr) -> tuple:
+    output = stdout.read().decode("utf-8", errors="replace").strip()
+    error = stderr.read().decode("utf-8", errors="replace").strip()
+    try:
+        rc = stdout.channel.recv_exit_status()
+    except Exception:
+        rc = 0
+    return rc, output, error
+
+
+def detect_remote_os_sync(ssh) -> str:
+    """Return windows/linux using commands that do not trust the saved username."""
+    try:
+        _, stdout, stderr = ssh.exec_command(
+            'cmd.exe /d /s /c "echo REINSTALLOS_OS_WINDOWS"', timeout=15
+        )
+        _, output, error = _read_ssh_streams(stdout, stderr)
+        if "REINSTALLOS_OS_WINDOWS" in output or "REINSTALLOS_OS_WINDOWS" in error:
+            return "windows"
+    except Exception:
+        pass
+    try:
+        _, stdout, stderr = ssh.exec_command(
+            "sh -c 'printf REINSTALLOS_OS_LINUX'", timeout=15
+        )
+        _, output, error = _read_ssh_streams(stdout, stderr)
+        if "REINSTALLOS_OS_LINUX" in output or "REINSTALLOS_OS_LINUX" in error:
+            return "linux"
+    except Exception:
+        pass
+    raise RuntimeError("OS remote tidak dapat dideteksi sebagai Linux atau Windows")
+
+
+def _ssh_ports(data: dict) -> list:
+    ports = [PRIMARY_SSH_PORT, FALLBACK_SSH_PORT]
+    try:
+        stored = int(data.get("vps_port", FALLBACK_SSH_PORT))
+        if stored not in ports:
+            ports.append(stored)
+    except (TypeError, ValueError):
+        pass
+    return ports
+
+
+def _ssh_users(data: dict) -> list:
+    users = []
+    for user in (data.get("vps_user"), WINDOWS_INSTALL_USER, LINUX_INSTALL_USER):
+        user = str(user or "").strip()
+        if user and user.lower() not in {item.lower() for item in users}:
+            users.append(user)
+    return users
+
+
+def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
+    """Connect on 22022 first, then 22, and detect Linux versus Windows."""
+    errors = []
+    for port in _ssh_ports(data):
+        for username in _ssh_users(data):
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                ssh.connect(
+                    data["vps_ip"],
+                    port=port,
+                    username=username,
+                    password=data["vps_pass"],
+                    timeout=timeout,
+                    banner_timeout=timeout,
+                    auth_timeout=timeout,
+                    allow_agent=False,
+                    look_for_keys=False,
+                )
+                remote_os = detect_remote_os_sync(ssh)
+                return ssh, remote_os, port, username
+            except Exception as exc:
+                errors.append(f"{username}@{port}: {str(exc)[:100]}")
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+    raise RuntimeError("; ".join(errors[-4:]) or "Tidak ada endpoint SSH yang dapat diakses")
+
+
+def verify_exact_ssh_port_sync(data: dict, port: int) -> tuple:
+    """Authenticate to one exact port instead of silently falling back."""
+    errors = []
+    for username in _ssh_users(data):
+        ssh = None
+        try:
+            ssh = _connect_with_credentials(
+                data["vps_ip"], int(port), username, data["vps_pass"]
+            )
+            remote_os = detect_remote_os_sync(ssh)
+            return True, remote_os, username, ""
+        except Exception as exc:
+            errors.append(f"{username}: {str(exc)[:120]}")
+        finally:
+            if ssh:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+    return False, "", "", "; ".join(errors)
+
+
+def _sftp_put_bytes(ssh, remote_path: str, payload: bytes, mode: int = None) -> None:
+    sftp = ssh.open_sftp()
+    try:
+        with sftp.file(remote_path, "wb") as remote:
+            remote.write(payload)
+        if mode is not None:
+            sftp.chmod(remote_path, mode)
+    finally:
+        sftp.close()
+
+
+def _installer_arguments(data: dict) -> list:
+    args = shlex.split(str(data["os_cmd"]))
+    if data["os_type"] == "windows":
+        selected_language = str(data.get("lang") or "en").lower()
+        language = {"jp": "ja"}.get(selected_language, selected_language)
+        args = [
+            WINDOWS_2022_DD_IMAGES.get(selected_language, WINDOWS_2022_DD_IMAGES["en"])
+            if item == "__WIN2022_DD__" else item
+            for item in args
+        ]
+        args.extend([
+            "--lang", language,
+            "--username", WINDOWS_INSTALL_USER,
+            "--password", WINDOWS_INSTALL_PASSWORD,
+            "--ssh-port", str(PRIMARY_SSH_PORT),
+            "--rdp-port", "3389",
+            "--allow-ping",
+        ])
+    else:
+        args.extend([
+            "--username", LINUX_INSTALL_USER,
+            "--password", LINUX_INSTALL_PASSWORD,
+            "--ssh-port", str(PRIMARY_SSH_PORT),
+        ])
+    return args
+
+
+def _prepare_installer_assets(target_windows: bool) -> tuple:
+    reinstall_sh = _download_asset(REINSTALL_SH_URL, max_bytes=512 * 1024)
+    reinstall_bat = build_patched_reinstall_batch(
+        _download_asset(REINSTALL_BAT_URL, max_bytes=128 * 1024)
+    )
+    openssh_zip = b""
+    if target_windows:
+        reinstall_sh = build_patched_reinstall_script(reinstall_sh)
+        openssh_zip = _download_asset(
+            WINDOWS_OPENSSH_URL,
+            expected_sha256=WINDOWS_OPENSSH_SHA256,
+            max_bytes=8 * 1024 * 1024,
+        )
+    return reinstall_sh, reinstall_bat, openssh_zip
+
+
+def _launch_from_linux(ssh, data: dict, reinstall_sh: bytes, openssh_zip: bytes) -> str:
+    remote_dir = "/tmp/reinstallos-installer"
+    _, stdout, stderr = ssh.exec_command(f"rm -rf {remote_dir}; mkdir -m 700 {remote_dir}", timeout=30)
+    rc, _, error = _read_ssh_streams(stdout, stderr)
+    if rc != 0:
+        raise RuntimeError(f"Gagal membuat direktori installer: {error[:300]}")
+    _sftp_put_bytes(ssh, f"{remote_dir}/reinstall.sh", reinstall_sh, 0o700)
+    if openssh_zip:
+        _sftp_put_bytes(ssh, f"{remote_dir}/reinstallos-openssh.zip", openssh_zip, 0o600)
+
+    argv = ["bash", f"{remote_dir}/reinstall.sh", *_installer_arguments(data)]
+    command = f"{shlex.join(argv)} && reboot"
+    launch_command = (
+        "nohup sh -c " + shlex.quote(command) +
+        f" </dev/null >{remote_dir}/installer.log 2>&1 & echo $!"
+    )
+    _, stdout, stderr = ssh.exec_command(launch_command, timeout=30)
+    _, output, error = _read_ssh_streams(stdout, stderr)
+    pid_text = output.splitlines()
+    if not pid_text or not pid_text[-1].isdigit():
+        raise RuntimeError(error[:300] or "PID installer Linux tidak diterima")
+    return pid_text[-1]
+
+
+def _launch_from_windows(
+    ssh,
+    data: dict,
+    reinstall_sh: bytes,
+    reinstall_bat: bytes,
+    openssh_zip: bytes,
+) -> str:
+    # Upstream uses certutil for this bootstrap download, which can fail with
+    # Access Denied in a non-interactive scheduled task. Stage it over SFTP.
+    cygwin_setup = _download_asset(CYGWIN_SETUP_URL, max_bytes=8 * 1024 * 1024)
+    if len(cygwin_setup) < 1024 * 1024 or not cygwin_setup.startswith(b"MZ"):
+        raise RuntimeError("Bootstrap Cygwin Windows tidak valid")
+
+    remote_dir_cmd = r"C:\ProgramData\ReinstallOS"
+    _, stdout, stderr = ssh.exec_command(
+        f'cmd.exe /d /s /c "if not exist {remote_dir_cmd} mkdir {remote_dir_cmd}"',
+        timeout=30,
+    )
+    rc, _, error = _read_ssh_streams(stdout, stderr)
+    if rc != 0:
+        raise RuntimeError(f"Gagal membuat direktori installer Windows: {error[:300]}")
+
+    remote_dir_sftp = "C:/ProgramData/ReinstallOS"
+    _sftp_put_bytes(ssh, f"{remote_dir_sftp}/reinstall.bat", reinstall_bat)
+    _sftp_put_bytes(ssh, f"{remote_dir_sftp}/reinstall.sh", reinstall_sh)
+    _sftp_put_bytes(ssh, f"{remote_dir_sftp}/geoip", b"loc=US\r\n")
+    _sftp_put_bytes(ssh, f"{remote_dir_sftp}/setup-x86_64.exe", cygwin_setup)
+    if openssh_zip:
+        _sftp_put_bytes(ssh, f"{remote_dir_sftp}/reinstallos-openssh.zip", openssh_zip)
+
+    cmd_args = subprocess.list2cmdline(_installer_arguments(data))
+    runner = (
+        "@echo off\r\n"
+        f"cd /d {remote_dir_cmd}\r\n"
+        f"call reinstall.bat {cmd_args} >>installer.log 2>&1\r\n"
+        "if errorlevel 1 exit /b %errorlevel%\r\n"
+        "schtasks.exe /Delete /TN ReinstallOS-Installer /F >nul 2>&1\r\n"
+        "shutdown.exe /r /t 0 /f\r\n"
+    ).encode("utf-8")
+    _sftp_put_bytes(ssh, f"{remote_dir_sftp}/run-install.cmd", runner)
+
+    schedule = (
+        'cmd.exe /d /s /c "'
+        'schtasks.exe /Create /TN ReinstallOS-Installer /SC ONSTART /RU SYSTEM '
+        f'/RL HIGHEST /F /TR {remote_dir_cmd}\\run-install.cmd && '
+        'schtasks.exe /Run /TN ReinstallOS-Installer"'
+    )
+    _, stdout, stderr = ssh.exec_command(schedule, timeout=45)
+    rc, output, error = _read_ssh_streams(stdout, stderr)
+    if rc != 0:
+        raise RuntimeError(error[:500] or output[:500] or "Scheduled Task installer gagal")
+    return "windows-task"
+
+
 def launch_reinstall_sync(data: dict, stage_callback=None) -> tuple:
-    """Blocking SSH/download/launch work; always run this with asyncio.to_thread."""
+    """Detect the source OS, upload the matching installer, and launch it detached."""
     def report(stage: str) -> None:
         if stage_callback:
             try:
                 stage_callback(stage)
             except Exception as exc:
                 logger.warning("Could not report reinstall stage %s: %s", stage, exc)
+
     ssh = None
     try:
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(
-            data["vps_ip"],
-            port=int(data["vps_port"]),
-            username=data["vps_user"],
-            password=data["vps_pass"],
-            timeout=20,
-            banner_timeout=20,
-            auth_timeout=20,
+        ssh, source_os, connected_port, connected_user = connect_target_sync(data, timeout=20)
+        logger.info(
+            "Reinstall source detected: ip=%s os=%s ssh_port=%s user=%s",
+            data.get("vps_ip"), source_os, connected_port, connected_user,
         )
         report("downloading")
-
-        if data["os_type"] == "windows":
-            script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
-            remote_script = "/tmp/reinstallos-installnet.sh"
-            command = (
-                f"bash {shlex.quote(remote_script)} {data['os_cmd']} "
-                f"-lang {shlex.quote(data.get('lang') or 'en-us')} -pwd 'Digicore@1' -firmware; reboot"
-            )
-        elif data.get("os_engine") == "bin456789":
-            script_url = "https://raw.githubusercontent.com/bin456789/reinstall/main/reinstall.sh"
-            remote_script = "/tmp/reinstallos-reinstall.sh"
-            command = (
-                f"bash {shlex.quote(remote_script)} {data['os_cmd']} "
-                "--password 'Digicore@1'; reboot"
+        reinstall_sh, reinstall_bat, openssh_zip = _prepare_installer_assets(
+            data.get("os_type") == "windows"
+        )
+        report("launching")
+        if source_os == "windows":
+            token = _launch_from_windows(
+                ssh, data, reinstall_sh, reinstall_bat, openssh_zip
             )
         else:
-            script_url = "https://raw.githubusercontent.com/leitbogioro/Tools/master/Linux_reinstall/InstallNET.sh"
-            remote_script = "/tmp/reinstallos-installnet.sh"
-            command = (
-                f"bash {shlex.quote(remote_script)} {data['os_cmd']} "
-                "-pwd 'Digicore@1' -firmware; reboot"
-            )
-
-        download = (
-            f"rm -f {shlex.quote(remote_script)}; "
-            f"wget --no-check-certificate -q -O {shlex.quote(remote_script)} {shlex.quote(script_url)}; "
-            f"test -s {shlex.quote(remote_script)}"
-        )
-        _, stdout, stderr = ssh.exec_command(download, timeout=120)
-        rc = stdout.channel.recv_exit_status()
-        if rc != 0:
-            error = stderr.read().decode(errors="replace").strip()
-            return False, f"Gagal download installer (exit {rc}): {error[:300]}"
-
-        report("launching")
-        launch_command = (
-            "nohup sh -c " + shlex.quote(command) +
-            " </dev/null >/tmp/reinstallos-installer.log 2>&1 & echo $!"
-        )
-        _, stdout, stderr = ssh.exec_command(launch_command, timeout=30)
-        pid_text = stdout.read().decode(errors="replace").strip().splitlines()
-        error = stderr.read().decode(errors="replace").strip()
-        if not pid_text or not pid_text[-1].isdigit():
-            return False, f"Installer tidak berhasil dijalankan: {error[:300] or 'PID tidak diterima'}"
-        return True, pid_text[-1]
+            token = _launch_from_linux(ssh, data, reinstall_sh, openssh_zip)
+        return True, token
     except Exception as exc:
         return False, str(exc)[:500]
     finally:
@@ -2588,7 +3141,6 @@ def launch_reinstall_sync(data: dict, stage_callback=None) -> tuple:
             except Exception:
                 pass
 
-
 async def is_port_open(ip: str, port: int, timeout: int = 5) -> bool:
     def probe():
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -2597,6 +3149,19 @@ async def is_port_open(ip: str, port: int, timeout: int = 5) -> bool:
             return sock.connect_ex((ip, int(port))) == 0
         finally:
             sock.close()
+    return await asyncio.to_thread(probe)
+
+
+async def is_ssh_service_open(ip: str, port: int, timeout: int = 5) -> bool:
+    """Require an SSH protocol banner; some providers accept TCP on closed ports."""
+    def probe():
+        try:
+            with socket.create_connection((ip, int(port)), timeout=timeout) as sock:
+                sock.settimeout(timeout)
+                banner = sock.recv(255)
+                return banner.startswith(b"SSH-")
+        except OSError:
+            return False
     return await asyncio.to_thread(probe)
 
 
@@ -2661,64 +3226,231 @@ def linux_os_matches(requested_os: str, detected_os: str) -> bool:
     return bool(family and family in detected and all(version in detected for version in versions))
 
 
-def fix_linux_password_sync(vps_ip: str) -> tuple:
-    """Enable the established root login and return the detected installed OS."""
-    default_passwords = [
-        "Digicore@1", "digicore", "Bolehtuh1", "LeitboGi0662",
-        "Teddysun.com", "teddysun.com", "",
-    ]
-    default_users = ["root", "ubuntu", "debian"]
-    last_error = "Tidak ada kredensial default installer yang berhasil"
+def _connect_with_credentials(vps_ip: str, port: int, username: str, password: str, timeout: int = 12):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    ssh.connect(
+        vps_ip,
+        port=int(port),
+        username=username,
+        password=password,
+        timeout=timeout,
+        banner_timeout=timeout,
+        auth_timeout=timeout,
+        allow_agent=False,
+        look_for_keys=False,
+    )
+    return ssh
 
-    for username in default_users:
-        for password in default_passwords:
+
+def probe_linux_os_sync(vps_ip: str) -> tuple:
+    """Read the live Linux identity without modifying an installer environment."""
+    errors = []
+    for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
+        for username in (LINUX_INSTALL_USER, "ubuntu", "debian"):
             ssh = None
             try:
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                ssh.connect(
-                    vps_ip,
-                    port=22,
-                    username=username,
-                    password=password,
-                    timeout=10,
-                    banner_timeout=10,
-                    auth_timeout=10,
-                    allow_agent=False,
-                    look_for_keys=False,
+                ssh = _connect_with_credentials(
+                    vps_ip, port, username, LINUX_INSTALL_PASSWORD, timeout=10
                 )
-                fix_commands = (
-                    "echo 'root:Digicore@1' | sudo chpasswd 2>/dev/null; "
-                    "echo 'root:Digicore@1' | chpasswd 2>/dev/null; "
-                    "sudo sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
-                    "sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; "
-                    "sudo sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
-                    "sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; "
-                    "sudo systemctl restart sshd 2>/dev/null; sudo service ssh restart 2>/dev/null; "
-                    "systemctl restart sshd 2>/dev/null; service ssh restart 2>/dev/null; "
-                    "echo 'FIX_DONE'; grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true"
+                if detect_remote_os_sync(ssh) != "linux":
+                    raise RuntimeError("endpoint bukan Linux")
+                _, stdout, stderr = ssh.exec_command(
+                    "grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true",
+                    timeout=20,
                 )
-                _, stdout, _ = ssh.exec_command(fix_commands, timeout=30)
-                output = stdout.read().decode("utf-8", errors="ignore")
-                fix_success = "FIX_DONE" in output
-                detected_os = ""
+                _, output, error = _read_ssh_streams(stdout, stderr)
                 for line in output.splitlines():
                     if line.startswith("PRETTY_NAME="):
-                        detected_os = line.split("=", 1)[1].strip().strip("\"'")
-                        break
-                if fix_success and detected_os:
-                    return True, "", detected_os[:200]
-                return False, "OS hasil reinstall tidak dapat dibaca", detected_os[:200]
+                        detected = line.split("=", 1)[1].strip().strip("\"'")
+                        if detected:
+                            return True, "", detected[:200]
+                raise RuntimeError(error[:200] or "PRETTY_NAME tidak ditemukan")
             except Exception as exc:
-                last_error = str(exc)[:300]
+                errors.append(f"{username}@{port}: {str(exc)[:100]}")
             finally:
                 if ssh:
                     try:
                         ssh.close()
                     except Exception:
                         pass
+    return False, "; ".join(errors[-4:]), ""
+
+
+def fix_linux_password_sync(vps_ip: str) -> tuple:
+    """Verify Linux, establish root login, and retain SSH ports 22022 and 22."""
+    default_passwords = [
+        LINUX_INSTALL_PASSWORD, "digicore", "Bolehtuh1", "LeitboGi0662",
+        WINDOWS_INSTALL_PASSWORD, WINDOWS_INSTALL_PASSWORD.lower(), "",
+    ]
+    default_users = [LINUX_INSTALL_USER, "ubuntu", "debian"]
+    last_error = "Tidak ada kredensial default installer yang berhasil"
+
+    for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
+        for username in default_users:
+            for password in default_passwords:
+                ssh = None
+                try:
+                    ssh = _connect_with_credentials(vps_ip, port, username, password, timeout=10)
+                    if detect_remote_os_sync(ssh) != "linux":
+                        raise RuntimeError("endpoint bukan Linux")
+                    fix_commands = r'''
+set -eu
+if [ "$(id -u)" -ne 0 ]; then
+    SUDO="sudo"
+else
+    SUDO=""
+fi
+printf '%s\n' 'root:Digicore@1' | $SUDO chpasswd
+$SUDO mkdir -p /etc/ssh/sshd_config.d
+if ! $SUDO grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/\*\.conf' /etc/ssh/sshd_config; then
+    printf '%s\n' 'Include /etc/ssh/sshd_config.d/*.conf' | $SUDO tee /tmp/reinstallos-sshd-include >/dev/null
+    $SUDO sh -c 'cat /tmp/reinstallos-sshd-include /etc/ssh/sshd_config > /etc/ssh/sshd_config.reinstallos'
+    $SUDO mv /etc/ssh/sshd_config.reinstallos /etc/ssh/sshd_config
+fi
+$SUDO tee /etc/ssh/sshd_config.d/99-reinstallos-access.conf >/dev/null <<'EOF'
+Port 22022
+Port 22
+PermitRootLogin yes
+PasswordAuthentication yes
+EOF
+$SUDO sshd -t
+if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    $SUDO ufw allow 22/tcp >/dev/null
+    $SUDO ufw allow 22022/tcp >/dev/null
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && $SUDO systemctl is-active --quiet firewalld; then
+    $SUDO firewall-cmd --permanent --add-port=22/tcp >/dev/null
+    $SUDO firewall-cmd --permanent --add-port=22022/tcp >/dev/null
+    $SUDO firewall-cmd --reload >/dev/null
+fi
+if $SUDO systemctl is-active --quiet ssh.socket 2>/dev/null || $SUDO systemctl is-enabled --quiet ssh.socket 2>/dev/null; then
+    $SUDO systemctl disable --now ssh.socket >/dev/null 2>&1 || true
+fi
+$SUDO systemctl enable ssh.service >/dev/null 2>&1 || $SUDO systemctl enable sshd.service >/dev/null 2>&1 || true
+$SUDO systemctl restart ssh.service >/dev/null 2>&1 || $SUDO systemctl restart sshd.service >/dev/null 2>&1 || $SUDO service ssh restart >/dev/null
+printf 'REINSTALLOS_LINUX_READY\n'
+grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true
+'''
+                    _, stdout, stderr = ssh.exec_command(fix_commands, timeout=60)
+                    rc, output, error = _read_ssh_streams(stdout, stderr)
+                    if rc != 0 or "REINSTALLOS_LINUX_READY" not in output:
+                        raise RuntimeError(error[:300] or output[:300] or "konfigurasi SSH Linux gagal")
+                    detected_os = ""
+                    for line in output.splitlines():
+                        if line.startswith("PRETTY_NAME="):
+                            detected_os = line.split("=", 1)[1].strip().strip("\"'")
+                            break
+                except Exception as exc:
+                    last_error = str(exc)[:300]
+                    continue
+                finally:
+                    if ssh:
+                        try:
+                            ssh.close()
+                        except Exception:
+                            pass
+
+                # A local sshd restart is not enough: verify both ports from the bot host.
+                verified = True
+                for verify_port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
+                    verify_ssh = None
+                    try:
+                        verify_ssh = _connect_with_credentials(
+                            vps_ip, verify_port, LINUX_INSTALL_USER, LINUX_INSTALL_PASSWORD
+                        )
+                        if detect_remote_os_sync(verify_ssh) != "linux":
+                            raise RuntimeError("OS bukan Linux")
+                    except Exception as exc:
+                        verified = False
+                        last_error = f"verifikasi SSH {verify_port} gagal: {str(exc)[:220]}"
+                        break
+                    finally:
+                        if verify_ssh:
+                            try:
+                                verify_ssh.close()
+                            except Exception:
+                                pass
+                if verified and detected_os:
+                    return True, "", detected_os[:200]
     return False, last_error, ""
 
+
+def windows_os_matches(requested_os: str, detected_os: str) -> bool:
+    requested = requested_os.lower()
+    detected = detected_os.lower()
+    if "server" in requested:
+        years = re.findall(r"20\d{2}", requested)
+        return "windows server" in detected and all(year in detected for year in years)
+    versions = re.findall(r"windows\s+(10|11)", requested)
+    return bool(versions and f"windows {versions[0]}" in detected)
+
+
+def verify_windows_install_sync(vps_ip: str) -> tuple:
+    """Authenticate to final Windows and verify SSH 22022/22 plus RDP configuration."""
+    detected_os = ""
+    for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
+        ssh = None
+        try:
+            ssh = _connect_with_credentials(
+                vps_ip, port, WINDOWS_INSTALL_USER, WINDOWS_INSTALL_PASSWORD
+            )
+            if detect_remote_os_sync(ssh) != "windows":
+                return False, f"SSH {port} tidak mendeteksi Windows", detected_os
+            if not detected_os:
+                script = r'''
+$caption = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption
+if (-not $caption) { $caption = (Get-WmiObject Win32_OperatingSystem).Caption }
+$ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
+$rdp = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server').fDenyTSConnections
+Write-Output "OS:$caption"
+Write-Output "PORT22:$([int](22 -in $ports))"
+Write-Output "PORT22022:$([int](22022 -in $ports))"
+Write-Output "RDP_ENABLED:$([int]($rdp -eq 0))"
+'''
+                _, stdout, stderr = ssh.exec_command(_powershell_encoded(script), timeout=45)
+                rc, output, error = _read_ssh_streams(stdout, stderr)
+                if rc != 0:
+                    return False, error[:300] or "PowerShell verification failed", detected_os
+                for line in output.splitlines():
+                    if line.startswith("OS:"):
+                        detected_os = line[3:].strip()
+                markers = {line.strip() for line in output.splitlines()}
+                required = {"PORT22:1", "PORT22022:1", "RDP_ENABLED:1"}
+                if not required.issubset(markers):
+                    return False, "Verifikasi service Windows belum lengkap: " + ", ".join(sorted(markers)), detected_os
+        except Exception as exc:
+            return False, f"login Administrator SSH {port} gagal: {str(exc)[:250]}", detected_os
+        finally:
+            if ssh:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+    if not detected_os:
+        return False, "Nama Windows tidak dapat dibaca", ""
+    return True, "", detected_os[:200]
+
+
+def update_vps_credentials_after_reinstall(job: dict) -> None:
+    """Switch that user's isolated VPS record to the verified target credentials."""
+    user_id = int(job["user_id"])
+    vps_list = load_vps_list(user_id)
+    changed = False
+    for vps in vps_list:
+        if vps.get("vps_ip") != job.get("vps_ip"):
+            continue
+        if job.get("os_type") == "windows":
+            vps["vps_user"] = WINDOWS_INSTALL_USER
+            vps["vps_pass"] = WINDOWS_INSTALL_PASSWORD
+        else:
+            vps["vps_user"] = LINUX_INSTALL_USER
+            vps["vps_pass"] = LINUX_INSTALL_PASSWORD
+        vps["vps_port"] = PRIMARY_SSH_PORT
+        changed = True
+        break
+    if changed:
+        save_vps_list(user_id, vps_list)
 
 async def finish_reinstall_job(
     application: Application,
@@ -2742,24 +3474,31 @@ async def finish_reinstall_job(
         elapsed_minutes = max(0, int((int(job.get("completed_at", 0)) - int(job.get("started_at", 0))) / 60))
         if job.get("os_type") == "windows":
             login = (
-                f"  Host: {job['vps_ip']}:3389\n"
+                f"  SSH: ssh -p 22022 Administrator@{job['vps_ip']}\n"
+                "  SSH fallback: port 22\n"
+                f"  RDP: {job['vps_ip']}:3389\n"
                 "  User: Administrator\n"
                 "  Pass: Teddysun.com"
             )
+            detected = verification or "Windows"
             result_status = (
+                f"  ● OS: {detected}\n"
+                "  ● SSH 22022           READY\n"
+                "  ● SSH 22              READY\n"
                 "  ● RDP 3389            READY\n"
                 "  ● Final Check         VERIFIED\n"
             )
         else:
             login = (
-                f"  Host: ssh root@{job['vps_ip']}\n"
-                "  Port: 22\n"
+                f"  Host: ssh -p 22022 root@{job['vps_ip']}\n"
+                "  Fallback port: 22\n"
                 "  User: root\n"
                 "  Pass: Digicore@1"
             )
             detected = verification or "Linux dan SSH siap"
             result_status = (
                 f"  ● OS: {detected}\n"
+                "  ● SSH 22022           READY\n"
                 "  ● SSH 22              READY\n"
                 "  ● Root Login          READY\n"
                 "  ● Final Check         VERIFIED\n"
@@ -2806,7 +3545,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
     old_port = int(job.get("vps_port", 22))
     offline_seen = bool(job.get("offline_seen"))
     last_notice = 0
-    max_seconds = 35 * 60
+    max_seconds = (90 if job.get("os_type") == "windows" else 60) * 60
 
     while True:
         current = get_reinstall_job(job_id)
@@ -2818,17 +3557,24 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                 application,
                 job_id,
                 "timeout",
-                "Batas monitoring 35 menit tercapai. Periksa VPS secara manual; installer target tidak dibatalkan.",
+                f"Batas monitoring {int(max_seconds / 60)} menit tercapai. Periksa VPS secara manual; installer target tidak dibatalkan.",
             )
             return
 
-        old_open = await is_port_open(vps_ip, old_port)
+        old_open = await is_ssh_service_open(vps_ip, old_port)
         if not old_open and not offline_seen:
             offline_seen = True
             update_reinstall_job(job_id, offline_seen=True)
 
-        target_port = 3389 if current.get("os_type") == "windows" else 22
-        target_open = await is_port_open(vps_ip, target_port)
+        ssh_22022_open, ssh_22_open = await asyncio.gather(
+            is_ssh_service_open(vps_ip, PRIMARY_SSH_PORT),
+            is_ssh_service_open(vps_ip, FALLBACK_SSH_PORT),
+        )
+        if current.get("os_type") == "windows":
+            rdp_open = await is_port_open(vps_ip, 3389)
+            target_open = ssh_22022_open and ssh_22_open and rdp_open
+        else:
+            target_open = ssh_22022_open or ssh_22_open
         ready_for_verification = target_open and (
             offline_seen or (recovered and elapsed >= 5 * 60)
         )
@@ -2844,31 +3590,73 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             target_online_since = 0
             current = update_reinstall_job(job_id, target_online_since=0) or current
 
-        # Give SSH/RDP a short stabilization window before declaring the OS ready.
+        # Give SSH/RDP a short stabilization window before authenticating.
         if ready_for_verification and int(_time.time()) - target_online_since >= 45:
             if current.get("os_type") == "windows":
+                verify_success, verify_error, detected_os = await asyncio.to_thread(
+                    verify_windows_install_sync,
+                    vps_ip,
+                )
+                if not verify_success:
+                    await finish_reinstall_job(
+                        application,
+                        job_id,
+                        "failed",
+                        "Port Windows sudah terbuka, tetapi login/service belum terverifikasi: " + verify_error,
+                        verification=detected_os,
+                    )
+                    return
+                if not windows_os_matches(current.get("os_name", ""), detected_os):
+                    await finish_reinstall_job(
+                        application,
+                        job_id,
+                        "failed",
+                        f"OS tidak sesuai. Diminta {current.get('os_name')}, terdeteksi {detected_os}.",
+                        verification=detected_os,
+                    )
+                    return
+                update_vps_credentials_after_reinstall(current)
                 await finish_reinstall_job(
                     application,
                     job_id,
                     "completed",
-                    verification="RDP port 3389 siap",
-                )
-                return
-
-            fix_success, fix_error, detected_os = await asyncio.to_thread(
-                fix_linux_password_sync,
-                vps_ip,
-            )
-            if not fix_success:
-                await finish_reinstall_job(
-                    application,
-                    job_id,
-                    "failed",
-                    "VPS sudah online, tetapi login SSH atau OS belum dapat diverifikasi: " + fix_error,
                     verification=detected_os,
                 )
                 return
-            if not linux_os_matches(current.get("os_name", ""), detected_os):
+
+            # The reinstall engine exposes SSH from its temporary installer OS.
+            # Read /etc/os-release first and never modify that transient system.
+            probe_success, probe_error, detected_os = await asyncio.to_thread(
+                probe_linux_os_sync,
+                vps_ip,
+            )
+            if probe_success and linux_os_matches(current.get("os_name", ""), detected_os):
+                fix_success, fix_error, fixed_os = await asyncio.to_thread(
+                    fix_linux_password_sync,
+                    vps_ip,
+                )
+                detected_os = fixed_os or detected_os
+                if not fix_success:
+                    await finish_reinstall_job(
+                        application,
+                        job_id,
+                        "failed",
+                        "OS target terdeteksi, tetapi konfigurasi SSH final gagal: " + fix_error,
+                        verification=detected_os,
+                    )
+                    return
+                update_vps_credentials_after_reinstall(current)
+                await finish_reinstall_job(
+                    application,
+                    job_id,
+                    "completed",
+                    verification=detected_os,
+                )
+                return
+
+            # Give a Debian/Alpine installer environment time to finish. A stable
+            # mismatched OS after 20 minutes is treated as a real wrong result.
+            if probe_success and elapsed >= 20 * 60:
                 await finish_reinstall_job(
                     application,
                     job_id,
@@ -2877,13 +3665,16 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     verification=detected_os,
                 )
                 return
-            await finish_reinstall_job(
-                application,
-                job_id,
-                "completed",
-                verification=detected_os,
+            logger.info(
+                "Waiting for final Linux OS: ip=%s detected=%s error=%s",
+                vps_ip, detected_os or "-", probe_error[:120] if probe_error else "-",
             )
-            return
+            target_online_since = int(_time.time())
+            current = update_reinstall_job(
+                job_id,
+                target_online_since=target_online_since,
+                verification=detected_os[:200],
+            ) or current
 
         progress = min(90, max(30, int(elapsed / 12)))
         current = update_reinstall_job(
@@ -3155,7 +3946,7 @@ async def cmd_reboot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not data.get("vps_ip"):
         await update.message.reply_text("Gunakan /start untuk pilih VPS dulu.")
         return
-    await ssh_exec(data, "reboot")
+    await ssh_exec_for_os(data, "reboot", "Restart-Computer -Force")
     await update.message.reply_text(f"🔄 Reboot sent ke {data['vps_ip']}")
 
 

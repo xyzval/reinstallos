@@ -1,6 +1,6 @@
 # Reinstall OS - by xyzval
 
-Script dan Telegram Bot untuk reinstall VPS ke **Windows** atau **Linux** secara otomatis.
+Script dan Telegram Bot untuk reinstall VPS dua arah—**Linux ↔ Windows**—secara otomatis, dengan SSH 22022 + 22 dan RDP 3389 tetap tersedia setelah instalasi.
 
 ---
 
@@ -109,15 +109,19 @@ Setelah itu bot langsung jalan! ✅
 
 **Windows:**
 ```
-Host: IP_VPS:3389 (via Remote Desktop/RDP)
-User: Administrator
-Pass: Teddysun.com
+SSH utama:    ssh -p 22022 Administrator@IP_VPS
+SSH fallback: ssh -p 22 Administrator@IP_VPS
+RDP:          IP_VPS:3389
+User:         Administrator
+Pass:         Teddysun.com
 ```
 
 **Linux:**
 ```
-Host: ssh root@IP_VPS
-Pass: Digicore@1
+SSH utama:    ssh -p 22022 root@IP_VPS
+SSH fallback: ssh -p 22 root@IP_VPS
+User:         root
+Pass:         Digicore@1
 ```
 
 ---
@@ -129,19 +133,21 @@ Pass: Digicore@1
 | Multi-VPS per User | Setiap user hanya melihat dan mengelola VPS miliknya sendiri |
 | Owner & User | Owner menambah, menonaktifkan, dan mencabut akses user |
 | Masa Berlaku User | Pilihan 1/7/30 hari, manual 1–3650 hari, atau permanen; akses otomatis ditolak saat kedaluwarsa |
-| Reinstall OS | Windows & Linux, pilih dari menu |
+| Reinstall OS Dua Arah | Linux → Windows/Linux dan Windows → Windows/Debian/Ubuntu dari menu yang sama |
+| Deteksi OS Otomatis | Mencoba SSH 22022 lebih dahulu lalu 22; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
+| Windows Remote Access | OpenSSH otomatis di port 22022 dan 22, dengan RDP tetap aktif di 3389 |
 | Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
-| SSH Command | Kirim command langsung dari Telegram |
-| VPS Info | Lihat RAM, CPU, Disk, Uptime |
-| Reboot | Restart VPS dari Telegram |
+| SSH Command | Kirim command Bash (Linux) atau PowerShell (Windows) langsung dari Telegram |
+| VPS Info | Lihat RAM, CPU, Disk, Uptime pada Linux maupun Windows |
+| Reboot | Restart VPS Linux maupun Windows dari Telegram |
 | Status Check | Tombol Status dan `/ping` sama-sama mengecek ICMP, SSH 22, SSH 22022, dan RDP 3389 |
 | Open All Port | Buka firewall OS dengan konfirmasi 2 tahap, backup, dan verifikasi |
 | Edit Port | Tambah port SSH, pertahankan port lama, validasi, tes koneksi, dan rollback otomatis |
-| Edit Password | Ganti password root via SSH |
-| Auto-fix Password | Otomatis fix root password setelah install Linux |
+| Edit Password | Ganti password `root` di Linux atau `Administrator` di Windows melalui SSH |
+| Auto-fix Password/Port | Linux otomatis mengaktifkan root dan SSH 22022 + 22 setelah install |
 | Loading UI | Tampilan klasik SSH/download/run/install/final-check dalam satu pesan, didukung Jobs persisten |
 | Tombol Tahan Restart | Tombol menu/VPS/aksi dapat memulihkan sesi lama tanpa mewajibkan `/start` |
-| Verifikasi Hasil | Linux diverifikasi melalui SSH dan `/etc/os-release`; Windows ditunggu sampai RDP port 3389 siap |
+| Verifikasi Hasil | Linux wajib cocok OS-nya dan login di dua port; Windows wajib cocok OS-nya, login Administrator di dua port, dan RDP 3389 aktif |
 | Keamanan | Password auto-dihapus dari chat |
 
 ---
@@ -257,18 +263,23 @@ Pilih nomor OS dari menu, selesai!
 | Windows Server 2019 | Administrator / Teddysun.com |
 | Windows Server 2022 | Administrator / Teddysun.com |
 
-**Login via RDP port 3389**
+Windows Server 2022 memakai image Datacenter BIOS/MBR terverifikasi dari Teddysun
+sesuai bahasa yang dipilih, lalu bot menyuntikkan OpenSSH final sebelum reboot.
+Image ini cocok untuk VPS KVM/XEN BIOS dan tidak aktif secara otomatis; gunakan
+product key Windows yang sah bila diperlukan.
+
+**Login via SSH port 22022 (utama), SSH port 22 (fallback), atau RDP port 3389.**
 
 ### Linux
 
 | OS | Login Default |
 |---|---|
-| Debian 9, 10, 11, 12 | root / Digicore@1 |
+| Debian 11, 12 | root / Digicore@1 |
 | Ubuntu 20.04, 22.04 | root / Digicore@1 |
 | CentOS 9 Stream | root / Digicore@1 |
 | AlmaLinux 9 | root / Digicore@1 |
 
-**Login via SSH port 22**
+**Login via SSH port 22022 (utama) atau port 22 (fallback).**
 
 ---
 
@@ -341,7 +352,11 @@ systemctl daemon-reload
 - `reinstall_jobs.json` hanya menyimpan metadata non-rahasia; password VPS tetap diambil dari bucket VPS milik user saat dibutuhkan
 - Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
 - Saat semua slot eksekusi penuh, job baru masuk antrean otomatis; antrean tetap dibatasi agar server bot terlindungi
-- Linux hanya dinyatakan selesai setelah SSH dan identitas OS terverifikasi; Windows menunggu RDP port 3389 siap
+- Linux hanya dinyatakan selesai setelah identitas OS dan login `root` pada SSH 22022 + 22 terverifikasi
+- Windows hanya dinyatakan selesai setelah identitas OS, login `Administrator` pada SSH 22022 + 22, dan RDP 3389 terverifikasi
+- OpenSSH Windows dibundel dari rilis resmi Microsoft Win32-OpenSSH yang dipin dan diverifikasi SHA-256; first boot tidak bergantung pada download OpenSSH
+- Saat reinstall dimulai dari Windows, bootstrap Cygwin diunduh oleh server bot lalu diunggah lewat SFTP; scheduled task tidak bergantung pada `certutil` yang dapat gagal pada sesi non-interaktif
+- Setelah verifikasi sukses, record VPS milik user itu saja diperbarui ke user/port/password target; Jobs tetap tidak menyimpan salinan password
 - Installer target dijalankan detached. Setelah installer dimulai tidak ada tombol cancel yang mengklaim dapat membatalkan reinstall dengan aman
 - Gunakan VPS terpisah untuk menjalankan bot (jangan di VPS yang sama yang mau di-reinstall)
 
