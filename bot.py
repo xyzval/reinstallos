@@ -3385,7 +3385,7 @@ def probe_linux_os_sync(vps_ip: str) -> tuple:
 
 
 def fix_linux_password_sync(vps_ip: str) -> tuple:
-    """Verify Linux, establish root login, and retain SSH ports 22022 and 22."""
+    """Verify Linux, install curl, establish root login, and retain both SSH ports."""
     default_passwords = [
         LINUX_INSTALL_PASSWORD, "digicore", "Bolehtuh1", "LeitboGi0662",
         WINDOWS_INSTALL_PASSWORD, WINDOWS_INSTALL_PASSWORD.lower(), "",
@@ -3408,6 +3408,33 @@ if [ "$(id -u)" -ne 0 ]; then
 else
     SUDO=""
 fi
+install_curl() {
+    if command -v curl >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        for attempt in 1 2 3; do
+            if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 update -qq && \
+               $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl ca-certificates; then
+                return 0
+            fi
+            sleep 10
+        done
+        return 1
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+        $SUDO dnf -y install curl ca-certificates
+        return
+    fi
+    if command -v yum >/dev/null 2>&1; then
+        $SUDO yum -y install curl ca-certificates
+        return
+    fi
+    echo 'Tidak ada package manager yang didukung untuk memasang curl' >&2
+    return 1
+}
+install_curl
+command -v curl >/dev/null 2>&1
 printf '%s\n' 'root:Digicore@1' | $SUDO chpasswd
 $SUDO mkdir -p /etc/ssh/sshd_config.d
 if ! $SUDO grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/\*\.conf' /etc/ssh/sshd_config; then
@@ -3436,13 +3463,15 @@ if $SUDO systemctl is-active --quiet ssh.socket 2>/dev/null || $SUDO systemctl i
 fi
 $SUDO systemctl enable ssh.service >/dev/null 2>&1 || $SUDO systemctl enable sshd.service >/dev/null 2>&1 || true
 $SUDO systemctl restart ssh.service >/dev/null 2>&1 || $SUDO systemctl restart sshd.service >/dev/null 2>&1 || $SUDO service ssh restart >/dev/null
+printf 'REINSTALLOS_CURL_READY\n'
 printf 'REINSTALLOS_LINUX_READY\n'
 grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true
 '''
-                    _, stdout, stderr = ssh.exec_command(fix_commands, timeout=60)
+                    _, stdout, stderr = ssh.exec_command(fix_commands, timeout=300)
                     rc, output, error = _read_ssh_streams(stdout, stderr)
-                    if rc != 0 or "REINSTALLOS_LINUX_READY" not in output:
-                        raise RuntimeError(error[:300] or output[:300] or "konfigurasi SSH Linux gagal")
+                    required_markers = {"REINSTALLOS_CURL_READY", "REINSTALLOS_LINUX_READY"}
+                    if rc != 0 or not required_markers.issubset(set(output.splitlines())):
+                        raise RuntimeError(error[:300] or output[:300] or "konfigurasi SSH/curl Linux gagal")
                     detected_os = ""
                     for line in output.splitlines():
                         if line.startswith("PRETTY_NAME="):

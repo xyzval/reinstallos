@@ -144,7 +144,7 @@ Pass:         Digicore@1
 | Open All Port | Buka firewall OS dengan konfirmasi 2 tahap, backup, dan verifikasi |
 | Edit Port | Tambah port SSH, pertahankan port lama, validasi, tes koneksi, dan rollback otomatis |
 | Edit Password | Ganti password `root` di Linux atau `Administrator` di Windows melalui SSH |
-| Auto-fix Password/Port | Linux otomatis mengaktifkan root dan SSH 22022 + 22 setelah install |
+| Auto-fix Linux | Linux otomatis memasang `curl` + CA certificates, mengaktifkan root, dan mempertahankan SSH 22022 + 22 setelah install |
 | Loading UI | Tampilan klasik SSH/download/run/install/final-check dalam satu pesan, didukung Jobs persisten |
 | Tombol Tahan Restart | Tombol menu/VPS/aksi dapat memulihkan sesi lama tanpa mewajibkan `/start` |
 | Verifikasi Hasil | Linux wajib cocok OS-nya dan login di dua port; Windows wajib cocok OS-nya, login Administrator di dua port, dan RDP 3389 aktif |
