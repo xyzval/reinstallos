@@ -87,10 +87,10 @@ WINDOWS_OPTIONS = {
     "win11": {"name": "Windows 11", "cmd": 'windows --image-name "Windows 11 Pro"'},
     "ws2012": {"name": "Windows Server 2012 R2", "cmd": 'windows --image-name "Windows Server 2012 R2 ServerStandard"'},
     "ws2016": {"name": "Windows Server 2016", "cmd": 'windows --image-name "Windows Server 2016 ServerStandard"'},
-    "ws2019": {"name": "Windows Server 2019", "cmd": 'windows --image-name "Windows Server 2019 ServerStandard"'},
-    # The pinned DD images avoid the frequently expiring/throttled ISO-search URL.
-    # bin456789 still mounts and modifies the final Windows volume, so our
-    # OpenSSH/RDP provisioning hook is applied exactly as with ISO installs.
+    # Pinned DD images avoid the frequently expiring/throttled ISO-search URLs.
+    # bin456789 mounts the written NTFS volume, allowing our OpenSSH/RDP hook to
+    # configure the final Windows installation before its first boot.
+    "ws2019": {"name": "Windows Server 2019", "cmd": "dd --img __WIN2019_DD__"},
     "ws2022": {"name": "Windows Server 2022", "cmd": "dd --img __WIN2022_DD__"},
 }
 
@@ -113,6 +113,15 @@ WINDOWS_OPENSSH_URL = (
     "v9.5.0.0p1-Beta/OpenSSH-Win64.zip"
 )
 WINDOWS_OPENSSH_SHA256 = "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c"
+WINDOWS_2019_DD_IMAGES = {
+    "en": "https://dl.lamp.sh/vhd/en_win2019.xz",
+    "en-us": "https://dl.lamp.sh/vhd/en_win2019.xz",
+    "cn": "https://dl.lamp.sh/vhd/cn_win2019.xz",
+    "zh-cn": "https://dl.lamp.sh/vhd/cn_win2019.xz",
+    "jp": "https://dl.lamp.sh/vhd/ja_win2019.xz",
+    "ja": "https://dl.lamp.sh/vhd/ja_win2019.xz",
+    "ja-jp": "https://dl.lamp.sh/vhd/ja_win2019.xz",
+}
 WINDOWS_2022_DD_IMAGES = {
     "en": "https://dl.lamp.sh/vhd/en-us_win2022.xz",
     "en-us": "https://dl.lamp.sh/vhd/en-us_win2022.xz",
@@ -2817,7 +2826,8 @@ def build_patched_reinstall_script(upstream: bytes) -> bytes:
     hook = rf'''
 
     # ReinstallOS: bundle and inject final-Windows OpenSSH before initrd repacking.
-    if [ "$distro" = windows ]; then
+    # Raw DD images are also mounted and passed through modify_windows by trans.sh.
+    if [ "$distro" = windows ] || [ "$distro" = dd ]; then
         openssh_bundle="$(dirname "$THIS_SCRIPT")/reinstallos-openssh.zip"
         [ -s "$openssh_bundle" ] || error_and_exit "Missing $openssh_bundle"
         openssh_sha=$(openssl dgst -sha256 "$openssh_bundle" | awk '{{print $NF}}')
@@ -2988,9 +2998,13 @@ def _installer_arguments(data: dict) -> list:
     if data["os_type"] == "windows":
         selected_language = str(data.get("lang") or "en").lower()
         language = {"jp": "ja"}.get(selected_language, selected_language)
+        dd_images = {
+            "__WIN2019_DD__": WINDOWS_2019_DD_IMAGES,
+            "__WIN2022_DD__": WINDOWS_2022_DD_IMAGES,
+        }
         args = [
-            WINDOWS_2022_DD_IMAGES.get(selected_language, WINDOWS_2022_DD_IMAGES["en"])
-            if item == "__WIN2022_DD__" else item
+            dd_images[item].get(selected_language, dd_images[item]["en"])
+            if item in dd_images else item
             for item in args
         ]
         args.extend([
