@@ -86,7 +86,7 @@ WINDOWS_OPTIONS = {
     "win10": {"name": "Windows 10", "cmd": 'windows --image-name "Windows 10 Pro"'},
     "win11": {"name": "Windows 11", "cmd": 'windows --image-name "Windows 11 Pro"'},
     "ws2012": {"name": "Windows Server 2012 R2", "cmd": 'windows --image-name "Windows Server 2012 R2 ServerStandard"'},
-    "ws2016": {"name": "Windows Server 2016", "cmd": 'windows --image-name "Windows Server 2016 ServerStandard"'},
+    "ws2016": {"name": "Windows Server 2016", "cmd": "dd --img __WIN2016_DD__"},
     # Pinned DD images avoid the frequently expiring/throttled ISO-search URLs.
     # bin456789 mounts the written NTFS volume, allowing our OpenSSH/RDP hook to
     # configure the final Windows installation before its first boot.
@@ -113,6 +113,15 @@ WINDOWS_OPENSSH_URL = (
     "v9.5.0.0p1-Beta/OpenSSH-Win64.zip"
 )
 WINDOWS_OPENSSH_SHA256 = "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c"
+WINDOWS_2016_DD_IMAGES = {
+    "en": "https://dl.lamp.sh/vhd/en_win2016.xz",
+    "en-us": "https://dl.lamp.sh/vhd/en_win2016.xz",
+    "cn": "https://dl.lamp.sh/vhd/cn_win2016.xz",
+    "zh-cn": "https://dl.lamp.sh/vhd/cn_win2016.xz",
+    "jp": "https://dl.lamp.sh/vhd/ja_win2016.xz",
+    "ja": "https://dl.lamp.sh/vhd/ja_win2016.xz",
+    "ja-jp": "https://dl.lamp.sh/vhd/ja_win2016.xz",
+}
 WINDOWS_2019_DD_IMAGES = {
     "en": "https://dl.lamp.sh/vhd/en_win2019.xz",
     "en-us": "https://dl.lamp.sh/vhd/en_win2019.xz",
@@ -2761,6 +2770,15 @@ try {
         'PasswordAuthentication yes'
     ) + $filtered | Set-Content -Path $config -Encoding ascii
 
+    # Older Windows releases do not generate host keys automatically, and
+    # sshd running as SYSTEM rejects keys created with inherited user ACLs.
+    & "$InstallDir\ssh-keygen.exe" -A
+    if ($LASTEXITCODE -ne 0) { throw "ssh-keygen.exe exit $LASTEXITCODE" }
+    $fixHostPermissions = "$InstallDir\FixHostFilePermissions.ps1"
+    if (Test-Path $fixHostPermissions) {
+        & $fixHostPermissions -Confirm:$false | Out-Null
+    }
+
     New-Item -Path 'HKLM:\SOFTWARE\OpenSSH' -Force | Out-Null
     New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell `
         -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' `
@@ -2780,16 +2798,45 @@ try {
         -Name fDenyTSConnections -Type DWord -Value 0
     Set-Service -Name TermService -StartupType Automatic -ErrorAction SilentlyContinue
     Start-Service -Name TermService -ErrorAction SilentlyContinue
-    Set-Service -Name sshd -StartupType Automatic
-    Restart-Service -Name sshd -Force
-    Start-Sleep -Seconds 3
+
+    # The Microsoft service wrapper works on newer Windows, but on Server 2016
+    # it can terminate with error 1067 even though sshd.exe itself is healthy.
+    # Prefer the service and fall back to a SYSTEM startup task when necessary.
+    $serviceStarted = $false
+    try {
+        Set-Service -Name sshd -StartupType Automatic
+        Restart-Service -Name sshd -Force -ErrorAction Stop
+        Start-Sleep -Seconds 3
+        $serviceStarted = (Get-Service -Name sshd).Status -eq 'Running'
+    } catch {
+        "$(Get-Date -Format o) sshd service unavailable; using SYSTEM startup task: $($_.Exception.Message)" |
+            Out-File -FilePath $LogFile -Append -Encoding ascii
+    }
+
+    if (-not $serviceStarted) {
+        Stop-Service -Name sshd -Force -ErrorAction SilentlyContinue
+        Set-Service -Name sshd -StartupType Disabled -ErrorAction SilentlyContinue
+        $startScript = Join-Path $ConfigDir 'start-reinstallos-sshd.cmd'
+        @(
+            '@echo off'
+            '"C:\Program Files\OpenSSH-Win64\sshd.exe"'
+        ) | Set-Content -Path $startScript -Encoding ascii
+        schtasks.exe /Create /TN ReinstallOS-SSHD /SC ONSTART /RU SYSTEM /RL HIGHEST `
+            /F /TR $startScript | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "failed to create ReinstallOS-SSHD task" }
+        schtasks.exe /Run /TN ReinstallOS-SSHD | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "failed to run ReinstallOS-SSHD task" }
+        Start-Sleep -Seconds 5
+    } else {
+        cmd.exe /d /c 'schtasks.exe /Delete /TN ReinstallOS-SSHD /F >NUL 2>&1' | Out-Null
+    }
 
     $listening = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty LocalPort
     if (22 -notin $listening -or 22022 -notin $listening) {
         throw "sshd is not listening on both ports; listening=$($listening -join ',')"
     }
-    schtasks.exe /Delete /TN ReinstallOS-OpenSSH /F 2>$null | Out-Null
+    cmd.exe /d /c 'schtasks.exe /Delete /TN ReinstallOS-OpenSSH /F >NUL 2>&1' | Out-Null
     "$(Get-Date -Format o) OPENSSH_READY ports=22,22022 rdp=3389" |
         Out-File -FilePath $LogFile -Append -Encoding ascii
     exit 0
@@ -2999,6 +3046,7 @@ def _installer_arguments(data: dict) -> list:
         selected_language = str(data.get("lang") or "en").lower()
         language = {"jp": "ja"}.get(selected_language, selected_language)
         dd_images = {
+            "__WIN2016_DD__": WINDOWS_2016_DD_IMAGES,
             "__WIN2019_DD__": WINDOWS_2019_DD_IMAGES,
             "__WIN2022_DD__": WINDOWS_2022_DD_IMAGES,
         }

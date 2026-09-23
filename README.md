@@ -263,9 +263,9 @@ Pilih nomor OS dari menu, selesai!
 | Windows Server 2019 | Administrator / Teddysun.com |
 | Windows Server 2022 | Administrator / Teddysun.com |
 
-Windows Server 2019 dan 2022 memakai image Datacenter BIOS/MBR terverifikasi
-dari Teddysun sesuai bahasa yang dipilih, lalu bot menyuntikkan OpenSSH final
-sebelum reboot. Jalur DD ini menghindari pencarian ISO otomatis yang lambat atau
+Windows Server 2016, 2019, dan 2022 memakai image Datacenter BIOS/MBR
+terverifikasi dari Teddysun sesuai bahasa yang dipilih, lalu bot menyuntikkan
+OpenSSH final sebelum reboot. Jalur DD ini menghindari pencarian ISO otomatis yang lambat atau
 macet. Image cocok untuk VPS KVM/XEN BIOS dan tidak aktif secara otomatis;
 gunakan product key Windows yang sah bila diperlukan.
 
