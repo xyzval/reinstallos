@@ -256,18 +256,19 @@ Pilih nomor OS dari menu, selesai!
 
 | OS | Login Default |
 |---|---|
-| Windows 10 | Administrator / Teddysun.com |
-| Windows 11 | Administrator / Teddysun.com |
-| Windows Server 2012 R2 | Administrator / Teddysun.com |
+| Windows 10 — Eksperimental | Administrator / Teddysun.com |
+| Windows 11 — Eksperimental | Administrator / Teddysun.com |
+| Windows Server 2012 R2 — Eksperimental | Administrator / Teddysun.com |
 | Windows Server 2016 | Administrator / Teddysun.com |
 | Windows Server 2019 | Administrator / Teddysun.com |
 | Windows Server 2022 | Administrator / Teddysun.com |
 
-Windows Server 2016, 2019, dan 2022 memakai image Datacenter BIOS/MBR
-terverifikasi dari Teddysun sesuai bahasa yang dipilih, lalu bot menyuntikkan
-OpenSSH final sebelum reboot. Jalur DD ini menghindari pencarian ISO otomatis yang lambat atau
-macet. Image cocok untuk VPS KVM/XEN BIOS dan tidak aktif secara otomatis;
-gunakan product key Windows yang sah bila diperlukan.
+Semua pilihan Windows memakai pinned DD image BIOS/MBR dari Teddysun sesuai
+bahasa yang dipilih, lalu bot menyuntikkan OpenSSH final sebelum reboot. Jalur
+ini menghindari pencarian ISO otomatis yang lambat atau macet. Server 2016,
+2019, dan 2022 sudah terverifikasi end-to-end; Server 2012 R2, Windows 10, dan
+Windows 11 masih eksperimental dan belum dites instalasi. Image tidak aktif
+secara otomatis; gunakan product key Windows yang sah bila diperlukan.
 
 **Login via SSH port 22022 (utama), SSH port 22 (fallback), atau RDP port 3389.**
 

@@ -83,13 +83,13 @@ MAX_QUEUED_REINSTALL_JOBS = max(1, int(os.getenv("MAX_QUEUED_REINSTALL_JOBS", "2
 # (reinstall.bat).  Keeping a single command grammar is also safer for restart
 # recovery than choosing an engine from the current OS.
 WINDOWS_OPTIONS = {
-    "win10": {"name": "Windows 10", "cmd": 'windows --image-name "Windows 10 Pro"'},
-    "win11": {"name": "Windows 11", "cmd": 'windows --image-name "Windows 11 Pro"'},
-    "ws2012": {"name": "Windows Server 2012 R2", "cmd": 'windows --image-name "Windows Server 2012 R2 ServerStandard"'},
-    "ws2016": {"name": "Windows Server 2016", "cmd": "dd --img __WIN2016_DD__"},
     # Pinned DD images avoid the frequently expiring/throttled ISO-search URLs.
     # bin456789 mounts the written NTFS volume, allowing our OpenSSH/RDP hook to
     # configure the final Windows installation before its first boot.
+    "win10": {"name": "Windows 10 (Eksperimental)", "cmd": "dd --img __WIN10_DD__"},
+    "win11": {"name": "Windows 11 (Eksperimental)", "cmd": "dd --img __WIN11_DD__"},
+    "ws2012": {"name": "Windows Server 2012 R2 (Eksperimental)", "cmd": "dd --img __WIN2012_DD__"},
+    "ws2016": {"name": "Windows Server 2016", "cmd": "dd --img __WIN2016_DD__"},
     "ws2019": {"name": "Windows Server 2019", "cmd": "dd --img __WIN2019_DD__"},
     "ws2022": {"name": "Windows Server 2022", "cmd": "dd --img __WIN2022_DD__"},
 }
@@ -113,6 +113,33 @@ WINDOWS_OPENSSH_URL = (
     "v9.5.0.0p1-Beta/OpenSSH-Win64.zip"
 )
 WINDOWS_OPENSSH_SHA256 = "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c"
+WINDOWS_10_DD_IMAGES = {
+    "en": "https://dl.lamp.sh/vhd/en-us_windows10_ltsc.xz",
+    "en-us": "https://dl.lamp.sh/vhd/en-us_windows10_ltsc.xz",
+    "cn": "https://dl.lamp.sh/vhd/zh-cn_windows10_ltsc.xz",
+    "zh-cn": "https://dl.lamp.sh/vhd/zh-cn_windows10_ltsc.xz",
+    "jp": "https://dl.lamp.sh/vhd/ja-jp_windows10_ltsc.xz",
+    "ja": "https://dl.lamp.sh/vhd/ja-jp_windows10_ltsc.xz",
+    "ja-jp": "https://dl.lamp.sh/vhd/ja-jp_windows10_ltsc.xz",
+}
+WINDOWS_11_DD_IMAGES = {
+    "en": "https://dl.lamp.sh/vhd/en-us_windows11.xz",
+    "en-us": "https://dl.lamp.sh/vhd/en-us_windows11.xz",
+    "cn": "https://dl.lamp.sh/vhd/zh-cn_windows11.xz",
+    "zh-cn": "https://dl.lamp.sh/vhd/zh-cn_windows11.xz",
+    "jp": "https://dl.lamp.sh/vhd/ja-jp_windows11.xz",
+    "ja": "https://dl.lamp.sh/vhd/ja-jp_windows11.xz",
+    "ja-jp": "https://dl.lamp.sh/vhd/ja-jp_windows11.xz",
+}
+WINDOWS_2012_DD_IMAGES = {
+    "en": "https://dl.lamp.sh/vhd/en_win2012r2.xz",
+    "en-us": "https://dl.lamp.sh/vhd/en_win2012r2.xz",
+    "cn": "https://dl.lamp.sh/vhd/cn_win2012r2.xz",
+    "zh-cn": "https://dl.lamp.sh/vhd/cn_win2012r2.xz",
+    "jp": "https://dl.lamp.sh/vhd/ja_win2012r2.xz",
+    "ja": "https://dl.lamp.sh/vhd/ja_win2012r2.xz",
+    "ja-jp": "https://dl.lamp.sh/vhd/ja_win2012r2.xz",
+}
 WINDOWS_2016_DD_IMAGES = {
     "en": "https://dl.lamp.sh/vhd/en_win2016.xz",
     "en-us": "https://dl.lamp.sh/vhd/en_win2016.xz",
@@ -3061,6 +3088,9 @@ def _installer_arguments(data: dict) -> list:
         selected_language = str(data.get("lang") or "en").lower()
         language = {"jp": "ja"}.get(selected_language, selected_language)
         dd_images = {
+            "__WIN10_DD__": WINDOWS_10_DD_IMAGES,
+            "__WIN11_DD__": WINDOWS_11_DD_IMAGES,
+            "__WIN2012_DD__": WINDOWS_2012_DD_IMAGES,
             "__WIN2016_DD__": WINDOWS_2016_DD_IMAGES,
             "__WIN2019_DD__": WINDOWS_2019_DD_IMAGES,
             "__WIN2022_DD__": WINDOWS_2022_DD_IMAGES,
