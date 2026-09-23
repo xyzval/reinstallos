@@ -2977,33 +2977,48 @@ def _ssh_users(data: dict) -> list:
     return users
 
 
+def _ssh_passwords(data: dict) -> list:
+    """Try the saved secret first, then known post-reinstall credentials."""
+    passwords = []
+    for password in (
+        data.get("vps_pass"),
+        WINDOWS_INSTALL_PASSWORD,
+        LINUX_INSTALL_PASSWORD,
+    ):
+        password = str(password or "")
+        if password and password not in passwords:
+            passwords.append(password)
+    return passwords
+
+
 def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
     """Connect on 22022 first, then 22, and detect Linux versus Windows."""
     errors = []
     for port in _ssh_ports(data):
         for username in _ssh_users(data):
-            ssh = paramiko.SSHClient()
-            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            try:
-                ssh.connect(
-                    data["vps_ip"],
-                    port=port,
-                    username=username,
-                    password=data["vps_pass"],
-                    timeout=timeout,
-                    banner_timeout=timeout,
-                    auth_timeout=timeout,
-                    allow_agent=False,
-                    look_for_keys=False,
-                )
-                remote_os = detect_remote_os_sync(ssh)
-                return ssh, remote_os, port, username
-            except Exception as exc:
-                errors.append(f"{username}@{port}: {str(exc)[:100]}")
+            for password in _ssh_passwords(data):
+                ssh = paramiko.SSHClient()
+                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
                 try:
-                    ssh.close()
-                except Exception:
-                    pass
+                    ssh.connect(
+                        data["vps_ip"],
+                        port=port,
+                        username=username,
+                        password=password,
+                        timeout=timeout,
+                        banner_timeout=timeout,
+                        auth_timeout=timeout,
+                        allow_agent=False,
+                        look_for_keys=False,
+                    )
+                    remote_os = detect_remote_os_sync(ssh)
+                    return ssh, remote_os, port, username
+                except Exception as exc:
+                    errors.append(f"{username}@{port}: {str(exc)[:100]}")
+                    try:
+                        ssh.close()
+                    except Exception:
+                        pass
     raise RuntimeError("; ".join(errors[-4:]) or "Tidak ada endpoint SSH yang dapat diakses")
 
 
