@@ -257,7 +257,7 @@ Pilih nomor OS dari menu, selesai!
 | OS | Login Default |
 |---|---|
 | Windows 10 — Eksperimental | Administrator / Teddysun.com |
-| Windows 11 — Eksperimental | Administrator / Teddysun.com |
+| Windows 11 | Administrator / Teddysun.com |
 | Windows Server 2012 R2 — Eksperimental | Administrator / Teddysun.com |
 | Windows Server 2016 | Administrator / Teddysun.com |
 | Windows Server 2019 | Administrator / Teddysun.com |
@@ -354,7 +354,7 @@ systemctl daemon-reload
 - `reinstall_jobs.json` hanya menyimpan metadata non-rahasia; password VPS tetap diambil dari bucket VPS milik user saat dibutuhkan
 - Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
 - Saat semua slot eksekusi penuh, job baru masuk antrean otomatis; antrean tetap dibatasi agar server bot terlindungi
-- Linux hanya dinyatakan selesai setelah identitas OS dan login `root` pada SSH 22022 + 22 terverifikasi
+- Linux hanya dinyatakan selesai setelah identitas OS, ketersediaan `curl`, dan login `root` pada SSH 22022 + 22 terverifikasi
 - Windows hanya dinyatakan selesai setelah identitas OS, login `Administrator` pada SSH 22022 + 22, dan RDP 3389 terverifikasi
 - OpenSSH Windows dibundel dari rilis resmi Microsoft Win32-OpenSSH yang dipin dan diverifikasi SHA-256; first boot tidak bergantung pada download OpenSSH
 - Saat reinstall dimulai dari Windows, bootstrap Cygwin diunduh oleh server bot lalu diunggah lewat SFTP; scheduled task tidak bergantung pada `certutil` yang dapat gagal pada sesi non-interaktif
