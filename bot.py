@@ -86,9 +86,9 @@ WINDOWS_OPTIONS = {
     # Pinned DD images avoid the frequently expiring/throttled ISO-search URLs.
     # bin456789 mounts the written NTFS volume, allowing our OpenSSH/RDP hook to
     # configure the final Windows installation before its first boot.
-    "win10": {"name": "Windows 10 (Eksperimental)", "cmd": "dd --img __WIN10_DD__"},
+    "win10": {"name": "Windows 10", "cmd": "dd --img __WIN10_DD__"},
     "win11": {"name": "Windows 11", "cmd": "dd --img __WIN11_DD__"},
-    "ws2012": {"name": "Windows Server 2012 R2 (Eksperimental)", "cmd": "dd --img __WIN2012_DD__"},
+    "ws2012": {"name": "Windows Server 2012 R2", "cmd": "dd --img __WIN2012_DD__"},
     "ws2016": {"name": "Windows Server 2016", "cmd": "dd --img __WIN2016_DD__"},
     "ws2019": {"name": "Windows Server 2019", "cmd": "dd --img __WIN2019_DD__"},
     "ws2022": {"name": "Windows Server 2022", "cmd": "dd --img __WIN2022_DD__"},
