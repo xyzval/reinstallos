@@ -265,10 +265,11 @@ Pilih nomor OS dari menu, selesai!
 
 Semua pilihan Windows memakai pinned DD image BIOS/MBR dari Teddysun sesuai
 bahasa yang dipilih, lalu bot menyuntikkan OpenSSH final sebelum reboot. Jalur
-ini menghindari pencarian ISO otomatis yang lambat atau macet. Server 2016,
-2019, dan 2022 sudah terverifikasi end-to-end; Server 2012 R2, Windows 10, dan
-Windows 11 masih eksperimental dan belum dites instalasi. Image tidak aktif
-secara otomatis; gunakan product key Windows yang sah bila diperlukan.
+ini menghindari pencarian ISO otomatis yang lambat atau macet. Windows 11 serta
+Server 2016, 2019, dan 2022 sudah terverifikasi end-to-end sampai kembali ke
+Debian 12. Server 2012 R2 dan Windows 10 masih eksperimental dan belum dites
+instalasi. Image tidak aktif secara otomatis; gunakan product key Windows yang
+sah bila diperlukan.
 
 **Login via SSH port 22022 (utama), SSH port 22 (fallback), atau RDP port 3389.**
 
