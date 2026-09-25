@@ -137,6 +137,7 @@ Pass:         Digicore@1
 | Deteksi OS Otomatis | Mencoba SSH 22022 lebih dahulu lalu 22; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
 | Windows Remote Access | OpenSSH otomatis di port 22022 dan 22, dengan RDP tetap aktif di 3389 |
 | Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
+| Detail Jobs & Akses | Status/tahap/waktu/verifikasi ditampilkan rapi; akses final hanya dibuka setelah konfirmasi dan hanya untuk pemilik job terbaru |
 | SSH Command | Kirim command Bash (Linux) atau PowerShell (Windows) langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime pada Linux maupun Windows |
 | Reboot | Restart VPS Linux maupun Windows dari Telegram |
@@ -352,6 +353,7 @@ systemctl daemon-reload
 - Jangan share bot token ke siapapun
 - File `.env`, `authorized_users.json`, `vps_data.json`, dan `reinstall_jobs.json` hanya bisa dibaca root (permission 600)
 - `reinstall_jobs.json` hanya menyimpan metadata non-rahasia; password VPS tetap diambil dari bucket VPS milik user saat dibutuhkan
+- Detail akses final memerlukan konfirmasi, hanya dapat dibuka pemilik job, dan hanya tersedia pada job terbaru VPS agar kredensial lama tidak menyesatkan
 - Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
 - Saat semua slot eksekusi penuh, job baru masuk antrean otomatis; antrean tetap dibatasi agar server bot terlindungi
 - Linux hanya dinyatakan selesai setelah identitas OS, ketersediaan `curl`, dan login `root` pada SSH 22022 + 22 terverifikasi

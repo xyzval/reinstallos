@@ -481,14 +481,34 @@ RUNNING_JOB_STATES = {"connecting", "downloading", "launching", "monitoring"}
 ACTIVE_JOB_STATES = {"queued", *RUNNING_JOB_STATES}
 TERMINAL_JOB_STATES = {"completed", "failed", "timeout"}
 JOB_STATUS_LABELS = {
-    "queued": "⏳ Antrean",
-    "connecting": "🔌 Menghubungkan",
-    "downloading": "⬇️ Mengunduh installer",
+    "queued": "⏳ Menunggu antrean",
+    "connecting": "🔌 Menghubungkan SSH",
+    "downloading": "⬇️ Menyiapkan installer",
     "launching": "🚀 Menjalankan installer",
-    "monitoring": "⚙️ Installing/monitoring",
+    "monitoring": "⚙️ Memasang dan memverifikasi",
     "completed": "✅ Selesai",
     "failed": "❌ Gagal",
     "timeout": "⚠️ Timeout",
+}
+
+JOB_STATUS_ICONS = {
+    "queued": "⏳",
+    "connecting": "🔌",
+    "downloading": "⬇️",
+    "launching": "🚀",
+    "monitoring": "⚙️",
+    "completed": "✅",
+    "failed": "❌",
+    "timeout": "⚠️",
+}
+
+JOB_STAGE_NUMBERS = {
+    "queued": 0,
+    "connecting": 1,
+    "downloading": 2,
+    "launching": 3,
+    "monitoring": 4,
+    "completed": 5,
 }
 
 
@@ -644,6 +664,73 @@ def find_job_vps_credentials(job: dict):
     return data
 
 
+def is_latest_job_for_vps(job: dict) -> bool:
+    """Only the newest job may expose current credentials for this VPS."""
+    same_vps = [
+        item for item in load_reinstall_jobs().values()
+        if str(item.get("user_id")) == str(job.get("user_id"))
+        and item.get("vps_ip") == job.get("vps_ip")
+    ]
+    if not same_vps:
+        return False
+    _, newest = max(
+        enumerate(same_vps),
+        key=lambda pair: (int(pair[1].get("created_at", 0)), pair[0]),
+    )
+    return newest.get("job_id") == job.get("job_id")
+
+
+def job_access_available(job: dict) -> bool:
+    return bool(
+        job.get("status") == "completed"
+        and is_latest_job_for_vps(job)
+        and find_job_vps_credentials(job)
+    )
+
+
+def get_job_access_text(job: dict) -> str:
+    """Render current verified access without ever persisting a password in Jobs."""
+    credentials = find_job_vps_credentials(job)
+    if not credentials:
+        return "❌ Detail akses tidak ditemukan pada data VPS milik Anda."
+
+    ip = str(job.get("vps_ip", "-"))
+    username = str(credentials.get("vps_user") or (
+        WINDOWS_INSTALL_USER if job.get("os_type") == "windows" else LINUX_INSTALL_USER
+    ))
+    password = str(credentials.get("vps_pass", "-"))
+    lines = [
+        "─────────────────────────────",
+        "  🔐  Akses VPS Terverifikasi",
+        "─────────────────────────────",
+        "",
+        "  ⚠️ Jangan bagikan pesan ini.",
+        "",
+        f"  IP VPS: {ip}",
+        "",
+        "  SSH utama:",
+        f"  ssh -p 22022 {username}@{ip}",
+        "",
+        "  SSH cadangan:",
+        f"  ssh -p 22 {username}@{ip}",
+    ]
+    if job.get("os_type") == "windows":
+        lines.extend([
+            "",
+            "  RDP:",
+            f"  {ip}:3389",
+        ])
+    lines.extend([
+        "",
+        f"  Username: {username}",
+        f"  Password: {password}",
+    ])
+    if job.get("os_type") == "linux":
+        lines.append("  curl: READY")
+    lines.extend(["", "─────────────────────────────"])
+    return "\n".join(lines)
+
+
 def format_job_time(timestamp: int) -> str:
     if not timestamp:
         return "-"
@@ -654,18 +741,19 @@ def get_jobs_text(user_id: int) -> str:
     jobs = get_user_reinstall_jobs(user_id)
     running = len(running_reinstall_jobs(user_id))
     queued = len(queued_reinstall_jobs(user_id))
+    history = sum(1 for job in jobs if job.get("status") in TERMINAL_JOB_STATES)
     lines = [
         "─────────────────────────────",
         "  📋  Reinstall Jobs",
         "─────────────────────────────",
         "",
-        f"  Berjalan: {running}",
-        f"  Antrean: {queued}",
-        f"  Riwayat ditampilkan: {len(jobs)}",
+        f"  Aktif   : {running}",
+        f"  Antrean : {queued}",
+        f"  Riwayat : {history}",
         "",
     ]
     if jobs:
-        lines.append("  Tekan job untuk melihat detail/progress.")
+        lines.append("  Pilih job untuk melihat detail.")
     else:
         lines.append("  Belum ada job reinstall.")
     lines.extend(["", "─────────────────────────────"])
@@ -675,11 +763,18 @@ def get_jobs_text(user_id: int) -> str:
 def get_jobs_keyboard(user_id: int) -> InlineKeyboardMarkup:
     keyboard = []
     for job in get_user_reinstall_jobs(user_id, limit=10):
-        status = JOB_STATUS_LABELS.get(job.get("status"), job.get("status", "?"))
-        if job.get("status") == "queued":
-            status += f" #{get_queue_position(job['job_id'])}"
-        label = f"{status} · {job.get('vps_ip')}"
-        keyboard.append([InlineKeyboardButton(label[:55], callback_data=f"jobs_detail_{job['job_id']}")])
+        state = job.get("status", "")
+        icon = JOB_STATUS_ICONS.get(state, "•")
+        os_name = str(job.get("os_name", "OS"))
+        ip = str(job.get("vps_ip", "-"))
+        if state == "queued":
+            label = f"{icon} #{get_queue_position(job['job_id'])} · {os_name} · {ip}"
+        elif state in RUNNING_JOB_STATES:
+            stage = JOB_STAGE_NUMBERS.get(state, 0)
+            label = f"{icon} {stage}/5 · {os_name} · {ip}"
+        else:
+            label = f"{icon} {os_name} · {ip}"
+        keyboard.append([InlineKeyboardButton(label[:60], callback_data=f"jobs_detail_{job['job_id']}")])
     keyboard.extend([
         [InlineKeyboardButton("🔄 Refresh", callback_data="jobs_list")],
         [InlineKeyboardButton("✖️ Tutup", callback_data="jobs_close")],
@@ -688,57 +783,113 @@ def get_jobs_keyboard(user_id: int) -> InlineKeyboardMarkup:
 
 
 def get_job_detail_text(job: dict) -> str:
-    status = JOB_STATUS_LABELS.get(job.get("status"), job.get("status", "?"))
+    state = job.get("status", "")
+    status = JOB_STATUS_LABELS.get(state, state or "?")
+    stage = JOB_STAGE_NUMBERS.get(state)
+    started = int(job.get("started_at") or 0)
+    completed = int(job.get("completed_at") or 0)
+    end_time = completed or int(_time.time())
+    duration = int((end_time - started) / 60) if started and end_time >= started else 0
+
     lines = [
         "─────────────────────────────",
         "  📋  Detail Reinstall Job",
         "─────────────────────────────",
         "",
-        f"  Job ID: {job.get('job_id')}",
-        f"  VPS: {job.get('vps_ip')}:{job.get('vps_port')}",
-        f"  OS diminta: {job.get('os_name')}",
-        f"  Status: {status}",
-        f"  Progress: {int(job.get('progress', 0))}%",
-        f"  Dibuat: {format_job_time(job.get('created_at', 0))}",
-        f"  Mulai: {format_job_time(job.get('started_at', 0))}",
-        f"  Update: {format_job_time(job.get('updated_at', 0))}",
+        "  🎯 TARGET",
+        f"  Job ID : {job.get('job_id')}",
+        f"  VPS    : {job.get('vps_ip')}:{job.get('vps_port')}",
+        f"  OS     : {job.get('os_name')}",
+        f"  Status : {status}",
     ]
-    if job.get("status") == "queued":
-        lines.append(f"  Posisi antrean: {get_queue_position(job['job_id']) or '-'}")
-    if job.get("completed_at"):
-        lines.append(f"  Selesai: {format_job_time(job.get('completed_at', 0))}")
-        started = int(job.get("started_at") or 0)
-        completed = int(job.get("completed_at") or 0)
-        if started and completed >= started:
-            lines.append(f"  Durasi: {int((completed - started) / 60)} menit")
-    if job.get("verification"):
-        if job.get("os_type") == "linux":
-            lines.append(f"  OS terdeteksi: {str(job['verification'])[:200]}")
-        else:
-            lines.append(f"  Verifikasi: {str(job['verification'])[:200]}")
-    if job.get("status") == "completed":
+    if stage is not None:
+        lines.append(f"  Tahap  : {stage} dari 5")
+    if state == "queued":
+        lines.append(f"  Antrean: #{get_queue_position(job['job_id']) or '-'}")
+
+    lines.extend([
+        "",
+        "  ⏱ WAKTU",
+        f"  Dibuat : {format_job_time(job.get('created_at', 0))}",
+        f"  Mulai  : {format_job_time(started)}",
+        f"  Update : {format_job_time(job.get('updated_at', 0))}",
+    ])
+    if completed:
+        lines.append(f"  Selesai: {format_job_time(completed)}")
+    if started:
+        lines.append(f"  Durasi : {duration} menit")
+
+    lines.extend(["", "  🔍 VERIFIKASI"])
+    if state == "completed":
+        detected = str(job.get("verification") or job.get("os_name") or "-")[:200]
+        lines.append(f"  OS terdeteksi       : {detected}")
+        lines.extend([
+            "  SSH 22022          : READY",
+            "  SSH 22             : READY",
+        ])
         if job.get("os_type") == "linux":
             lines.extend([
-                "  SSH port 22022: READY",
-                "  SSH port 22: READY",
-                "  Login root: READY",
+                "  Login root         : READY",
+                "  curl               : READY",
             ])
         else:
             lines.extend([
-                "  SSH port 22022: READY",
-                "  SSH port 22: READY",
                 "  Login Administrator: READY",
-                "  RDP port 3389: READY",
+                "  RDP 3389           : READY",
             ])
+        lines.append("  Final Check         : VERIFIED")
+        if job_access_available(job):
+            lines.extend(["", "  🔐 Detail akses tersedia melalui tombol di bawah."])
+        else:
+            lines.extend(["", "  🔒 Akses hanya tersedia pada job terbaru untuk VPS ini."])
+    elif state in ACTIVE_JOB_STATES:
+        lines.append("  Menunggu pemeriksaan final otomatis.")
+    else:
+        lines.append("  Instalasi belum berhasil diverifikasi.")
+
     if job.get("error"):
-        lines.extend(["", f"  Pesan: {str(job['error'])[:500]}"])
+        lines.extend([
+            "",
+            "  ⚠️ PESAN",
+            f"  {str(job['error'])[:500]}",
+            "",
+            "  Periksa VPS melalui console/VNC bila diperlukan.",
+            "  Data VPS tetap tersimpan dan installer tidak dibatalkan.",
+        ])
     lines.extend(["", "─────────────────────────────"])
     return "\n".join(lines)
 
 
 def get_job_detail_keyboard(job: dict) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
+    keyboard = []
+    if job_access_available(job):
+        keyboard.append([
+            InlineKeyboardButton(
+                "🔐 Tampilkan Detail Akses",
+                callback_data=f"jobs_access_confirm_{job['job_id']}",
+            )
+        ])
+    keyboard.extend([
         [InlineKeyboardButton("🔄 Refresh", callback_data=f"jobs_detail_{job['job_id']}")],
+        [InlineKeyboardButton("◀️ Daftar Jobs", callback_data="jobs_list")],
+        [InlineKeyboardButton("✖️ Tutup", callback_data="jobs_close")],
+    ])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_job_access_confirm_keyboard(job: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(
+            "🔓 Tampilkan Akses",
+            callback_data=f"jobs_access_show_{job['job_id']}",
+        )],
+        [InlineKeyboardButton("◀️ Batal", callback_data=f"jobs_detail_{job['job_id']}")],
+    ])
+
+
+def get_job_access_keyboard(job: dict) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🙈 Sembunyikan Akses", callback_data=f"jobs_detail_{job['job_id']}")],
         [InlineKeyboardButton("◀️ Daftar Jobs", callback_data="jobs_list")],
         [InlineKeyboardButton("✖️ Tutup", callback_data="jobs_close")],
     ])
@@ -783,6 +934,47 @@ async def handle_jobs_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if action == "jobs_list":
         await safe_edit_query(query, get_jobs_text(user_id), get_jobs_keyboard(user_id))
+        return
+
+    if action.startswith("jobs_access_confirm_"):
+        job_id = action[len("jobs_access_confirm_"):]
+        job = get_reinstall_job(job_id)
+        if not job or str(job.get("user_id")) != str(user_id):
+            await safe_edit_query(query, "❌ Job tidak ditemukan atau bukan milik Anda.", get_jobs_keyboard(user_id))
+            return
+        if not job_access_available(job):
+            await safe_edit_query(
+                query,
+                "❌ Detail akses hanya tersedia untuk job terbaru yang sudah terverifikasi.",
+                get_job_detail_keyboard(job),
+            )
+            return
+        await safe_edit_query(
+            query,
+            "─────────────────────────────\n"
+            "  ⚠️  Konfirmasi Detail Akses\n"
+            "─────────────────────────────\n\n"
+            "  Pesan berikut berisi username dan password VPS.\n\n"
+            "  Pastikan Anda berada di chat pribadi dan tidak sedang membagikan layar.\n\n"
+            "─────────────────────────────",
+            get_job_access_confirm_keyboard(job),
+        )
+        return
+
+    if action.startswith("jobs_access_show_"):
+        job_id = action[len("jobs_access_show_"):]
+        job = get_reinstall_job(job_id)
+        if not job or str(job.get("user_id")) != str(user_id):
+            await safe_edit_query(query, "❌ Job tidak ditemukan atau bukan milik Anda.", get_jobs_keyboard(user_id))
+            return
+        if not job_access_available(job):
+            await safe_edit_query(
+                query,
+                "❌ Detail akses tidak lagi tersedia. Periksa job terbaru VPS ini.",
+                get_jobs_keyboard(user_id),
+            )
+            return
+        await safe_edit_query(query, get_job_access_text(job), get_job_access_keyboard(job))
         return
 
     if action.startswith("jobs_detail_"):
@@ -2653,24 +2845,25 @@ def build_install_progress_text(
         ),
     }
     rows = phase_rows.get(phase, phase_rows["queued"])
+    stage = JOB_STAGE_NUMBERS.get(phase, 0)
+    # The upstream installer exposes phases, not trustworthy byte-level progress.
+    # Keep the classic bar as a stage indicator without claiming a fake ETA.
     display_progress = {
         "queued": 0,
-        "connecting": 0,
-        "downloading": 15,
-        "launching": 30,
-    }.get(phase, progress)
-    display_progress = max(0, min(100, int(display_progress)))
+        "connecting": 10,
+        "downloading": 25,
+        "launching": 40,
+        "monitoring": 75,
+    }.get(phase, 0)
     filled = min(18, int(display_progress / 5.5))
     bar = "█" * filled + "░" * (18 - filled)
 
     timing = ""
     if phase == "monitoring":
         elapsed_minutes = max(0, int(elapsed_seconds / 60))
-        expected_minutes = 45 if job.get("os_type") == "windows" else 20
-        remaining_minutes = max(expected_minutes - elapsed_minutes, 2)
         timing = (
-            f"\n  ⏱ Elapsed: {elapsed_minutes} min\n"
-            f"  ⏳ Remaining: ~{remaining_minutes} min\n"
+            f"\n  ⏱ Berjalan: {elapsed_minutes} menit\n"
+            "  ℹ️ Menunggu verifikasi final otomatis\n"
         )
 
     return (
@@ -2681,7 +2874,7 @@ def build_install_progress_text(
         f"  📦 {job['os_name']}\n\n"
         "─────────────────────────────\n\n"
         + "\n".join(rows) + "\n\n"
-        f"  ┃{bar}┃ {display_progress}%\n"
+        f"  ┃{bar}┃ Tahap {stage}/5\n"
         f"{timing}\n"
         "─────────────────────────────"
     )
@@ -3637,6 +3830,7 @@ async def finish_reinstall_job(
                 "  ● SSH 22022           READY\n"
                 "  ● SSH 22              READY\n"
                 "  ● Root Login          READY\n"
+                "  ● curl                READY\n"
                 "  ● Final Check         VERIFIED\n"
             )
         text = (
@@ -3659,11 +3853,16 @@ async def finish_reinstall_job(
             "─────────────────────────────\n"
             f"  ❌  Reinstall {label}\n"
             "─────────────────────────────\n\n"
-            f"  Job ID: {job_id}\n"
-            f"  VPS: {job['vps_ip']}\n"
-            f"  OS: {job['os_name']}\n"
-            f"  Pesan: {error[:500] or '-'}\n\n"
-            "  Data VPS tetap tersimpan.\n"
+            f"  Job ID : {job_id}\n"
+            f"  VPS    : {job['vps_ip']}\n"
+            f"  OS     : {job['os_name']}\n\n"
+            "  Penyebab:\n"
+            f"  {error[:500] or '-'}\n\n"
+            "  Tindakan:\n"
+            "  • Periksa VPS melalui console/VNC.\n"
+            "  • Buka /jobs untuk detail dan status terbaru.\n"
+            "  • Data VPS tetap tersimpan.\n\n"
+            "  Installer yang sudah berjalan tidak dibatalkan.\n"
             "─────────────────────────────"
         )
     await edit_job_progress(application, job_id, text)
