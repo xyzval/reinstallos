@@ -2671,16 +2671,49 @@ async def ssh_exec_for_os(data: dict, linux_cmd: str, windows_ps: str) -> tuple:
 
 
 async def get_vps_system_info(data: dict) -> str:
-    """Get system information using the detected platform's native shell."""
-    linux_info = (
-        "echo \"OS: $(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d'\\\"' -f2)\";"
-        "echo \"Kernel: $(uname -r)\";"
-        "echo \"Uptime: $(uptime -p 2>/dev/null || uptime)\";"
-        "echo \"CPU: $(nproc) cores\";"
-        "echo \"RAM: $(free -m | awk '/Mem:/ {printf \\\"%dMB / %dMB (%.0f%%)\\\", $3, $2, $3/$2*100}')\";"
-        "echo \"Disk: $(df -h / | awk 'NR==2 {printf \\\"%s / %s (%s)\\\", $3, $2, $5}')\";"
-        "echo \"Load: $(awk '{print $1, $2, $3}' /proc/loadavg)\""
-    )
+    """Get complete system specifications using the detected native shell."""
+    linux_info = r'''
+if [ -r /etc/os-release ]; then
+    . /etc/os-release
+    os_name=${PRETTY_NAME:-${NAME:-Linux}}
+else
+    os_name=$(uname -s)
+fi
+host_name=$(hostname 2>/dev/null || printf unknown)
+kernel=$(uname -r 2>/dev/null || printf unknown)
+architecture=$(uname -m 2>/dev/null || printf unknown)
+uptime_text=$(uptime -p 2>/dev/null || uptime 2>/dev/null || printf unknown)
+cpu_cores=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || printf unknown)
+cpu_model=$(awk -F: '/model name|Hardware|Processor/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2; exit}' /proc/cpuinfo 2>/dev/null)
+[ -n "$cpu_model" ] || cpu_model=$(uname -p 2>/dev/null || printf unknown)
+if command -v free >/dev/null 2>&1; then
+    ram_info=$(free -m | awk '/^Mem:/ {if ($2 > 0) printf "%dMB / %dMB (%.0f%%)", $3, $2, $3/$2*100; else print "unknown"}')
+else
+    mem_total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
+    mem_available=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)
+    if [ -n "$mem_total" ] && [ -n "$mem_available" ] && [ "$mem_total" -gt 0 ]; then
+        mem_used=$((mem_total - mem_available))
+        ram_info="$((mem_used / 1024))MB / $((mem_total / 1024))MB ($((mem_used * 100 / mem_total))%)"
+    else
+        ram_info=unknown
+    fi
+fi
+disk_info=$(df -hP / 2>/dev/null | awk 'NR==2 {printf "%s / %s (%s)", $3, $2, $5}')
+[ -n "$disk_info" ] || disk_info=unknown
+load_info=$(awk '{print $1, $2, $3}' /proc/loadavg 2>/dev/null || printf unknown)
+virtualization=$(systemd-detect-virt 2>/dev/null || true)
+[ -n "$virtualization" ] || virtualization=unknown
+printf 'Hostname: %s\n' "$host_name"
+printf 'OS: %s\n' "$os_name"
+printf 'Kernel: %s\n' "$kernel"
+printf 'Arsitektur: %s\n' "$architecture"
+printf 'Virtualisasi: %s\n' "$virtualization"
+printf 'Uptime: %s\n' "$uptime_text"
+printf 'CPU: %s core - %s\n' "$cpu_cores" "$cpu_model"
+printf 'RAM: %s\n' "$ram_info"
+printf 'Disk /: %s\n' "$disk_info"
+printf 'Load: %s\n' "$load_info"
+'''
     windows_info = r'''
 $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
 if (-not $os) { $os = Get-WmiObject Win32_OperatingSystem }
@@ -2690,28 +2723,53 @@ $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue
 if (-not $cpu) { $cpu = Get-WmiObject Win32_Processor }
 $disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'" -ErrorAction SilentlyContinue
 if (-not $disk) { $disk = Get-WmiObject Win32_LogicalDisk -Filter "DeviceID='C:'" }
-$uptime = (Get-Date) - $os.LastBootUpTime
+$boot = $os.LastBootUpTime
+if ($boot -is [string]) {
+    try { $boot = [Management.ManagementDateTimeConverter]::ToDateTime($boot) } catch {}
+}
+$uptime = (Get-Date) - $boot
+$cpuName = (($cpu | Select-Object -First 1).Name -replace '\s+', ' ').Trim()
+$cpuCores = ($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum
+$ramTotal = [double]$cs.TotalPhysicalMemory
+$ramUsed = $ramTotal - ([double]$os.FreePhysicalMemory * 1KB)
+$ramPercent = if ($ramTotal -gt 0) { [math]::Round($ramUsed * 100 / $ramTotal) } else { 0 }
+$model = (($cs.Manufacturer, $cs.Model) -join ' ').Trim()
+Write-Output "Hostname: $env:COMPUTERNAME"
 Write-Output "OS: $($os.Caption)"
 Write-Output "Kernel: $($os.Version) build $($os.BuildNumber)"
+Write-Output "Arsitektur: $($os.OSArchitecture)"
+Write-Output "Platform: $model"
 Write-Output "Uptime: $([int]$uptime.TotalDays)d $($uptime.Hours)h $($uptime.Minutes)m"
-Write-Output "CPU: $(($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum) cores"
-Write-Output "RAM: $([math]::Round(($cs.TotalPhysicalMemory-$os.FreePhysicalMemory*1KB)/1GB,1))GB / $([math]::Round($cs.TotalPhysicalMemory/1GB,1))GB"
-Write-Output "Disk C: $([math]::Round(($disk.Size-$disk.FreeSpace)/1GB,1))GB / $([math]::Round($disk.Size/1GB,1))GB"
+Write-Output "CPU: $cpuCores core - $cpuName"
+Write-Output "RAM: $([math]::Round($ramUsed/1GB,1))GB / $([math]::Round($ramTotal/1GB,1))GB ($ramPercent%)"
+if ($disk -and $disk.Size) {
+    $diskUsed = [double]$disk.Size - [double]$disk.FreeSpace
+    $diskPercent = [math]::Round($diskUsed * 100 / [double]$disk.Size)
+    Write-Output "Disk C: $([math]::Round($diskUsed/1GB,1))GB / $([math]::Round($disk.Size/1GB,1))GB ($diskPercent%)"
+} else {
+    Write-Output 'Disk C: unknown'
+}
 '''
-    result, remote_os, port, username, _ = await ssh_exec_for_os(
+    result, remote_os, port, username, rc = await ssh_exec_for_os(
         data, linux_info, windows_info
     )
-    platform = "Windows / PowerShell" if remote_os == "windows" else "Linux / Bash" if remote_os == "linux" else "Tidak terdeteksi"
+    platform = (
+        "Windows / PowerShell" if remote_os == "windows"
+        else "Linux / Bash" if remote_os == "linux"
+        else "Tidak terdeteksi"
+    )
     endpoint = f"{data['vps_ip']}:{port or data.get('vps_port')}"
+    status_line = "✅ Spesifikasi berhasil dibaca" if rc == 0 and remote_os else "⚠️ Spesifikasi tidak lengkap"
     return (
         "─────────────────────────────\n"
         "  📊  VPS System Info\n"
         "─────────────────────────────\n\n"
         f"  🎯 {endpoint}\n"
         f"  🧭 {platform}\n"
-        f"  👤 {username or data.get('vps_user', '-')}\n\n"
+        f"  👤 {username or data.get('vps_user', '-')}\n"
+        f"  {status_line}\n\n"
         "─────────────────────────────\n\n"
-        f"{result}\n\n"
+        f"{result.strip()}\n\n"
         "─────────────────────────────"
     )
 
