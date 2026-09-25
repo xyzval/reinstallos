@@ -2759,19 +2759,68 @@ if ($disk -and $disk.Size) {
         else "Tidak terdeteksi"
     )
     endpoint = f"{data['vps_ip']}:{port or data.get('vps_port')}"
-    status_line = "✅ Spesifikasi berhasil dibaca" if rc == 0 and remote_os else "⚠️ Spesifikasi tidak lengkap"
-    return (
-        "─────────────────────────────\n"
-        "  📊  VPS System Info\n"
-        "─────────────────────────────\n\n"
-        f"  🎯 {endpoint}\n"
-        f"  🧭 {platform}\n"
-        f"  👤 {username or data.get('vps_user', '-')}\n"
-        f"  {status_line}\n\n"
-        "─────────────────────────────\n\n"
-        f"{result.strip()}\n\n"
-        "─────────────────────────────"
+    login_user = username or data.get("vps_user", "-")
+
+    if rc != 0 or not remote_os:
+        return (
+            "─────────────────────────────\n"
+            "  ⚠️  SPESIFIKASI VPS\n"
+            "─────────────────────────────\n\n"
+            f"  🎯 {endpoint}\n"
+            f"  👤 {login_user}\n\n"
+            "  Spesifikasi tidak dapat dibaca.\n\n"
+            f"  Detail: {result.strip()}\n\n"
+            "─────────────────────────────"
+        )
+
+    specs = {}
+    for line in result.splitlines():
+        if ":" in line:
+            key, value = line.split(":", 1)
+            specs[key.strip()] = value.strip() or "-"
+
+    def spec(name: str) -> str:
+        return specs.get(name, "-")
+
+    platform_name = (
+        spec("Platform") if remote_os == "windows" else spec("Virtualisasi")
     )
+    platform_label = "Platform" if remote_os == "windows" else "Virtualisasi"
+    disk_label = "Disk C" if remote_os == "windows" else "Disk /"
+    status_lines = [
+        "  ⏱️  STATUS",
+        f"  • Uptime: {spec('Uptime')}",
+    ]
+    if remote_os == "linux":
+        status_lines.append(f"  • Load: {spec('Load')}")
+
+    return "\n".join([
+        "─────────────────────────────",
+        "  📊  SPESIFIKASI VPS",
+        "─────────────────────────────",
+        "",
+        "  🔗  KONEKSI",
+        f"  • Alamat: {endpoint}",
+        f"  • Sistem: {platform}",
+        f"  • User: {login_user}",
+        "",
+        "  🖥️  SISTEM OPERASI",
+        f"  • Hostname: {spec('Hostname')}",
+        f"  • OS: {spec('OS')}",
+        f"  • Kernel: {spec('Kernel')}",
+        f"  • Arsitektur: {spec('Arsitektur')}",
+        f"  • {platform_label}: {platform_name}",
+        "",
+        "  ⚙️  HARDWARE",
+        f"  • CPU: {spec('CPU')}",
+        f"  • RAM: {spec('RAM')}",
+        f"  • {disk_label}: {spec(disk_label)}",
+        "",
+        *status_lines,
+        "",
+        "  ✅ Spesifikasi berhasil dibaca",
+        "─────────────────────────────",
+    ])
 
 # ============ OS Install Flow ============
 
