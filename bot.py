@@ -831,6 +831,7 @@ def get_job_detail_text(job: dict) -> str:
             lines.extend([
                 "  Login root         : READY",
                 "  curl               : READY",
+                "  Disk root          : MAXIMUM",
             ])
         else:
             lines.extend([
@@ -3734,8 +3735,145 @@ install_curl() {
     echo 'Tidak ada package manager yang didukung untuk memasang curl' >&2
     return 1
 }
+install_growpart() {
+    if command -v growpart >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        for attempt in 1 2 3; do
+            if $SUDO env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 update -qq && \
+               $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends cloud-guest-utils; then
+                return 0
+            fi
+            sleep 10
+        done
+        return 1
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+        $SUDO dnf -y install cloud-utils-growpart
+        return
+    fi
+    if command -v yum >/dev/null 2>&1; then
+        $SUDO yum -y install cloud-utils-growpart
+        return
+    fi
+    return 1
+}
+expand_root_disk() {
+    root_source=$(findmnt -n -o SOURCE / | sed 's/\[.*$//')
+    root_block=$(readlink -f "$root_source")
+    root_fstype=$(findmnt -n -o FSTYPE /)
+    [ -b "$root_block" ] || {
+        echo "Root device tidak didukung: $root_source" >&2
+        return 1
+    }
+
+    backing="$root_block"
+    root_type=$(lsblk -ndo TYPE "$root_block" 2>/dev/null | head -n1)
+    lvm_vg=""
+    lvm_lv=""
+    if [ "$root_type" = "lvm" ]; then
+        command -v pvs >/dev/null 2>&1 && command -v lvs >/dev/null 2>&1 || {
+            echo 'Perintah LVM tidak tersedia' >&2
+            return 1
+        }
+        lvm_lv=$($SUDO lvs --noheadings -o lv_path | while IFS= read -r candidate; do
+            candidate=$(printf '%s' "$candidate" | xargs)
+            if [ -n "$candidate" ] && [ "$(readlink -f "$candidate")" = "$root_block" ]; then
+                printf '%s\n' "$candidate"
+                break
+            fi
+        done)
+        [ -n "$lvm_lv" ] || {
+            echo 'Logical volume root tidak ditemukan' >&2
+            return 1
+        }
+        lvm_vg=$($SUDO lvs --noheadings -o vg_name "$lvm_lv" | xargs)
+        backing=$($SUDO pvs --noheadings --separator '|' -o pv_name,vg_name | \
+            awk -F'|' -v vg="$lvm_vg" '{gsub(/^[ \t]+|[ \t]+$/, "", $1); gsub(/^[ \t]+|[ \t]+$/, "", $2); if ($2 == vg) {print $1; exit}}')
+        backing=$(readlink -f "$backing")
+        [ -b "$backing" ] || {
+            echo "Physical volume untuk root LVM tidak ditemukan" >&2
+            return 1
+        }
+    fi
+
+    backing_type=$(lsblk -ndo TYPE "$backing" 2>/dev/null | head -n1)
+    if [ "$backing_type" = "part" ]; then
+        parent_name=$(lsblk -ndo PKNAME "$backing" 2>/dev/null | head -n1)
+        part_number=$(cat "/sys/class/block/$(basename "$backing")/partition" 2>/dev/null || true)
+        disk="/dev/$parent_name"
+        [ -b "$disk" ] && [ -n "$part_number" ] || {
+            echo "Disk induk partisi root tidak ditemukan" >&2
+            return 1
+        }
+        disk_size=$($SUDO blockdev --getsize64 "$disk")
+        allocated=$($SUDO lsblk -bnro TYPE,SIZE "$disk" | awk '$1 == "part" {sum += $2} END {printf "%.0f", sum + 0}')
+        unallocated=$((disk_size - allocated))
+        allowed_gap=$((disk_size / 50))
+        [ "$allowed_gap" -ge 1073741824 ] || allowed_gap=1073741824
+        if [ "$unallocated" -gt "$allowed_gap" ]; then
+            install_growpart || {
+                echo 'growpart tidak dapat dipasang' >&2
+                return 1
+            }
+            grow_rc=0
+            grow_output=$($SUDO growpart "$disk" "$part_number" 2>&1) || grow_rc=$?
+            if [ "$grow_rc" -ne 0 ] && ! printf '%s' "$grow_output" | grep -q '^NOCHANGE:'; then
+                printf '%s\n' "$grow_output" >&2
+                return 1
+            fi
+            $SUDO partprobe "$disk" >/dev/null 2>&1 || true
+            $SUDO udevadm settle >/dev/null 2>&1 || true
+        fi
+    elif [ "$backing_type" = "disk" ]; then
+        disk="$backing"
+    else
+        echo "Layout disk root tidak didukung: $backing_type" >&2
+        return 1
+    fi
+
+    if [ "$root_type" = "lvm" ]; then
+        $SUDO pvresize "$backing" >/dev/null
+        free_extents=$($SUDO vgs --noheadings -o vg_free_count "$lvm_vg" | xargs)
+        case "$free_extents" in
+            ''|*[!0-9]*) echo 'Free extent LVM tidak dapat dibaca' >&2; return 1 ;;
+        esac
+        if [ "$free_extents" -gt 0 ]; then
+            $SUDO lvextend -l +100%FREE "$lvm_lv" >/dev/null
+        fi
+    fi
+
+    case "$root_fstype" in
+        ext2|ext3|ext4) $SUDO resize2fs "$root_block" >/dev/null ;;
+        xfs) $SUDO xfs_growfs / >/dev/null ;;
+        btrfs) $SUDO btrfs filesystem resize max / >/dev/null ;;
+        *) echo "Filesystem root tidak didukung: $root_fstype" >&2; return 1 ;;
+    esac
+
+    disk_size=$($SUDO blockdev --getsize64 "$disk")
+    if [ "$backing_type" = "part" ]; then
+        allocated=$($SUDO lsblk -bnro TYPE,SIZE "$disk" | awk '$1 == "part" {sum += $2} END {printf "%.0f", sum + 0}')
+        unallocated=$((disk_size - allocated))
+    else
+        unallocated=0
+    fi
+    root_device_size=$($SUDO blockdev --getsize64 "$root_block")
+    root_fs_size=$(df -B1 --output=size / | awk 'NR == 2 {print $1}')
+    allowed_gap=$((disk_size / 50))
+    [ "$allowed_gap" -ge 1073741824 ] || allowed_gap=1073741824
+    fs_gap=$((root_device_size - root_fs_size))
+    allowed_fs_gap=$((root_device_size / 20))
+    [ "$allowed_fs_gap" -ge 1073741824 ] || allowed_fs_gap=1073741824
+    [ "$unallocated" -le "$allowed_gap" ] && [ "$fs_gap" -le "$allowed_fs_gap" ] || {
+        echo "Root disk belum maksimum: unallocated=$unallocated fs_gap=$fs_gap" >&2
+        return 1
+    }
+    printf 'REINSTALLOS_DISK_READY\n'
+}
 install_curl
 command -v curl >/dev/null 2>&1
+expand_root_disk
 printf '%s\n' 'root:Digicore@1' | $SUDO chpasswd
 $SUDO mkdir -p /etc/ssh/sshd_config.d
 if ! $SUDO grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/\*\.conf' /etc/ssh/sshd_config; then
@@ -3768,11 +3906,15 @@ printf 'REINSTALLOS_CURL_READY\n'
 printf 'REINSTALLOS_LINUX_READY\n'
 grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true
 '''
-                    _, stdout, stderr = ssh.exec_command(fix_commands, timeout=300)
+                    _, stdout, stderr = ssh.exec_command(fix_commands, timeout=600)
                     rc, output, error = _read_ssh_streams(stdout, stderr)
-                    required_markers = {"REINSTALLOS_CURL_READY", "REINSTALLOS_LINUX_READY"}
+                    required_markers = {
+                        "REINSTALLOS_CURL_READY",
+                        "REINSTALLOS_DISK_READY",
+                        "REINSTALLOS_LINUX_READY",
+                    }
                     if rc != 0 or not required_markers.issubset(set(output.splitlines())):
-                        raise RuntimeError(error[:300] or output[:300] or "konfigurasi SSH/curl Linux gagal")
+                        raise RuntimeError(error[:300] or output[:300] or "konfigurasi disk/SSH/curl Linux gagal")
                     detected_os = ""
                     for line in output.splitlines():
                         if line.startswith("PRETTY_NAME="):
@@ -3996,6 +4138,7 @@ async def finish_reinstall_job(
                 "  ● SSH 22              READY\n"
                 "  ● Root Login          READY\n"
                 "  ● curl                READY\n"
+                "  ● Disk root           MAXIMUM\n"
                 "  ● Final Check         VERIFIED\n"
             )
         text = (
