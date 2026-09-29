@@ -113,7 +113,7 @@ SSH utama:    ssh -p 22022 Administrator@IP_VPS
 SSH fallback: ssh -p 22 Administrator@IP_VPS
 RDP:          IP_VPS:3389
 User:         Administrator
-Pass:         Teddysun.com
+Pass:         digicore
 ```
 
 **Linux:**
@@ -136,6 +136,7 @@ Pass:         Digicore@1
 | Reinstall OS Dua Arah | Linux → Windows/Linux dan Windows → Windows/Debian/Ubuntu dari menu yang sama |
 | Deteksi OS Otomatis | Mencoba SSH 22022 lebih dahulu lalu 22; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
 | Windows Remote Access | OpenSSH otomatis di port 22022 dan 22, dengan RDP tetap aktif di 3389 |
+| Password Final Windows | Kredensial image hanya dipakai saat bootstrap, lalu password `Administrator` dirotasi ke `digicore` dan diuji ulang pada kedua port SSH |
 | Ekspansi Disk Otomatis | Partisi C Windows dan filesystem root Linux otomatis diperbesar ke kapasitas maksimum yang aman sebelum instalasi dinyatakan selesai |
 | Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
 | Detail Jobs & Akses | Status/tahap/waktu/verifikasi ditampilkan rapi; akses final hanya dibuka setelah konfirmasi dan hanya untuk pemilik job terbaru |
@@ -258,12 +259,12 @@ Pilih nomor OS dari menu, selesai!
 
 | OS | Login Default |
 |---|---|
-| Windows 10 | Administrator / Teddysun.com |
-| Windows 11 | Administrator / Teddysun.com |
-| Windows Server 2012 R2 | Administrator / Teddysun.com |
-| Windows Server 2016 | Administrator / Teddysun.com |
-| Windows Server 2019 | Administrator / Teddysun.com |
-| Windows Server 2022 | Administrator / Teddysun.com |
+| Windows 10 | Administrator / digicore |
+| Windows 11 | Administrator / digicore |
+| Windows Server 2012 R2 | Administrator / digicore |
+| Windows Server 2016 | Administrator / digicore |
+| Windows Server 2019 | Administrator / digicore |
+| Windows Server 2022 | Administrator / digicore |
 
 Semua pilihan Windows memakai pinned DD image BIOS/MBR dari Teddysun sesuai
 bahasa yang dipilih, lalu bot menyuntikkan OpenSSH final sebelum reboot. Jalur
@@ -273,6 +274,8 @@ end-to-end sampai kembali ke Debian 12. Image tidak aktif secara otomatis;
 gunakan product key Windows yang sah bila diperlukan.
 
 **Login via SSH port 22022 (utama), SSH port 22 (fallback), atau RDP port 3389.**
+
+> `digicore` adalah password sederhana sesuai konfigurasi yang diminta. Jika sebuah Windows Server menolak password huruf kecil, bot melonggarkan kebijakan kompleksitas lokal sebelum mencoba kembali. Batasi akses RDP/SSH menggunakan firewall provider bila VPS berada di internet publik.
 
 ### Linux
 
@@ -358,7 +361,7 @@ systemctl daemon-reload
 - Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
 - Saat semua slot eksekusi penuh, job baru masuk antrean otomatis; antrean tetap dibatasi agar server bot terlindungi
 - Linux hanya dinyatakan selesai setelah identitas OS, ekspansi aman filesystem root, ketersediaan `curl`, dan login `root` pada SSH 22022 + 22 terverifikasi
-- Windows hanya dinyatakan selesai setelah identitas OS, login `Administrator` pada SSH 22022 + 22, RDP 3389, dan ekspansi aman partisi C terverifikasi
+- Windows hanya dinyatakan selesai setelah identitas OS, password final `Administrator` pada SSH 22022 + 22, RDP 3389, dan ekspansi aman partisi C terverifikasi
 - OpenSSH Windows dibundel dari rilis resmi Microsoft Win32-OpenSSH yang dipin dan diverifikasi SHA-256; first boot tidak bergantung pada download OpenSSH
 - Saat reinstall dimulai dari Windows, bootstrap Cygwin diunduh oleh server bot lalu diunggah lewat SFTP; scheduled task tidak bergantung pada `certutil` yang dapat gagal pada sesi non-interaktif
 - Setelah verifikasi sukses, record VPS milik user itu saja diperbarui ke user/port/password target; Jobs tetap tidak menyimpan salinan password

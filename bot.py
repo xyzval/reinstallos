@@ -170,7 +170,10 @@ WINDOWS_2022_DD_IMAGES = {
 LINUX_INSTALL_USER = "root"
 LINUX_INSTALL_PASSWORD = "Digicore@1"
 WINDOWS_INSTALL_USER = "Administrator"
-WINDOWS_INSTALL_PASSWORD = "Teddysun.com"
+# Pinned DD images boot with the vendor credential; successful jobs rotate it
+# to the requested final credential and verify both SSH ports again.
+WINDOWS_IMAGE_PASSWORD = "Teddysun.com"
+WINDOWS_INSTALL_PASSWORD = "digicore"
 PRIMARY_SSH_PORT = 22022
 FALLBACK_SSH_PORT = 22
 _ASSET_CACHE = {}
@@ -836,6 +839,7 @@ def get_job_detail_text(job: dict) -> str:
         else:
             lines.extend([
                 "  Login Administrator: READY",
+                "  Password final     : READY",
                 "  RDP 3389           : READY",
                 "  Disk C             : MAXIMUM",
             ])
@@ -2897,7 +2901,7 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
         summary += f"  🌐 {LANG_OPTIONS.get(data['lang'], '')}\n"
     if os_type == "windows":
         summary += (
-            "\n  🔑 Login: Administrator / Teddysun.com\n"
+            f"\n  🔑 Login: Administrator / {WINDOWS_INSTALL_PASSWORD}\n"
             "  🔐 SSH: 22022 (utama) + 22\n"
             "  🖥️ RDP: 3389\n"
         )
@@ -3312,6 +3316,7 @@ def _ssh_passwords(data: dict) -> list:
     for password in (
         data.get("vps_pass"),
         WINDOWS_INSTALL_PASSWORD,
+        WINDOWS_IMAGE_PASSWORD,
         LINUX_INSTALL_PASSWORD,
     ):
         password = str(password or "")
@@ -3689,8 +3694,9 @@ def probe_linux_os_sync(vps_ip: str) -> tuple:
 def fix_linux_password_sync(vps_ip: str) -> tuple:
     """Verify Linux, install curl, establish root login, and retain both SSH ports."""
     default_passwords = [
-        LINUX_INSTALL_PASSWORD, "digicore", "Bolehtuh1", "LeitboGi0662",
-        WINDOWS_INSTALL_PASSWORD, WINDOWS_INSTALL_PASSWORD.lower(), "",
+        LINUX_INSTALL_PASSWORD, WINDOWS_INSTALL_PASSWORD,
+        "Bolehtuh1", "LeitboGi0662",
+        WINDOWS_IMAGE_PASSWORD, WINDOWS_IMAGE_PASSWORD.lower(), "",
     ]
     default_users = [LINUX_INSTALL_USER, "ubuntu", "debian"]
     last_error = "Tidak ada kredensial default installer yang berhasil"
@@ -3966,22 +3972,46 @@ def windows_os_matches(requested_os: str, detected_os: str) -> bool:
 
 
 def verify_windows_install_sync(vps_ip: str) -> tuple:
-    """Authenticate to final Windows and verify SSH 22022/22 plus RDP configuration."""
+    """Finalize Windows, rotate its password, and verify both SSH ports plus RDP."""
     detected_os = ""
+    bootstrap_ssh = None
+    bootstrap_errors = []
+
+    # A fresh raw DD image may still use its vendor credential. Recovered jobs
+    # may already have rotated it, so try the requested final credential first.
     for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
-        ssh = None
-        try:
-            ssh = _connect_with_credentials(
-                vps_ip, port, WINDOWS_INSTALL_USER, WINDOWS_INSTALL_PASSWORD
-            )
-            if detect_remote_os_sync(ssh) != "windows":
-                return False, f"SSH {port} tidak mendeteksi Windows", detected_os
-            if not detected_os:
-                script = r'''
+        for password in (WINDOWS_INSTALL_PASSWORD, WINDOWS_IMAGE_PASSWORD):
+            candidate = None
+            try:
+                candidate = _connect_with_credentials(
+                    vps_ip, port, WINDOWS_INSTALL_USER, password
+                )
+                if detect_remote_os_sync(candidate) != "windows":
+                    raise RuntimeError("endpoint bukan Windows")
+                bootstrap_ssh = candidate
+                candidate = None
+                break
+            except Exception as exc:
+                bootstrap_errors.append(f"Administrator@{port}: {str(exc)[:120]}")
+            finally:
+                if candidate:
+                    try:
+                        candidate.close()
+                    except Exception:
+                        pass
+        if bootstrap_ssh:
+            break
+
+    if not bootstrap_ssh:
+        return False, "; ".join(bootstrap_errors[-4:]) or "Login Windows gagal", ""
+
+    try:
+        script = r'''
 $caption = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption
 if (-not $caption) { $caption = (Get-WmiObject Win32_OperatingSystem).Caption }
 $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
 $rdp = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server').fDenyTSConnections
+$servicesReady = [int](22 -in $ports -and 22022 -in $ports -and $rdp -eq 0)
 $diskReady = 0
 $diskState = 'UNKNOWN'
 $diskError = ''
@@ -4026,6 +4056,39 @@ try {
     $diskState = 'FAILED'
     $diskError = ($_.Exception.Message -replace '[\r\n]+', ' ')
 }
+
+$passwordReady = 0
+$passwordError = ''
+if ($servicesReady -eq 1 -and $diskReady -eq 1) {
+    try {
+        $desiredPassword = '__REINSTALLOS_FINAL_PASSWORD__'
+        $accountName = $env:USERNAME
+        & net.exe user "$accountName" "$desiredPassword" | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            # The user explicitly requested a lowercase password. Older Server
+            # images can enforce complexity, so relax only the local policy and retry.
+            $cfg = Join-Path $env:TEMP 'reinstallos-security.inf'
+            $db = Join-Path $env:TEMP 'reinstallos-security.sdb'
+            & secedit.exe /export /cfg $cfg /quiet | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'gagal mengekspor local security policy' }
+            $policy = Get-Content $cfg -Raw
+            $policy = $policy -replace '(?m)^PasswordComplexity\s*=.*$', 'PasswordComplexity = 0'
+            $policy = $policy -replace '(?m)^MinimumPasswordLength\s*=.*$', 'MinimumPasswordLength = 0'
+            Set-Content -Path $cfg -Value $policy -Encoding Unicode
+            & secedit.exe /configure /db $db /cfg $cfg /areas SECURITYPOLICY /quiet | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'gagal menerapkan local security policy' }
+            & net.exe accounts /minpwlen:0 | Out-Null
+            & net.exe user "$accountName" "$desiredPassword" | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "net user exit $LASTEXITCODE" }
+        }
+        $passwordReady = 1
+    } catch {
+        $passwordError = ($_.Exception.Message -replace '[\r\n]+', ' ')
+    }
+} else {
+    $passwordError = 'service atau disk belum siap'
+}
+
 Write-Output "OS:$caption"
 Write-Output "PORT22:$([int](22 -in $ports))"
 Write-Output "PORT22022:$([int](22022 -in $ports))"
@@ -4034,36 +4097,65 @@ Write-Output "DISK_READY:$diskReady"
 Write-Output "DISK_STATE:$diskState"
 Write-Output "DISK_BEFORE_GB:$diskBeforeGB"
 Write-Output "DISK_AFTER_GB:$diskAfterGB"
+Write-Output "PASSWORD_READY:$passwordReady"
 if ($diskError) { Write-Output "DISK_ERROR:$diskError" }
-'''
-                _, stdout, stderr = ssh.exec_command(_powershell_encoded(script), timeout=90)
-                rc, output, error = _read_ssh_streams(stdout, stderr)
-                if rc != 0:
-                    return False, error[:300] or "PowerShell verification failed", detected_os
-                values = {}
-                for line in output.splitlines():
-                    if ":" not in line:
-                        continue
-                    key, value = line.strip().split(":", 1)
-                    values[key] = value.strip()
-                detected_os = values.get("OS", detected_os)
-                required = {"PORT22": "1", "PORT22022": "1", "RDP_ENABLED": "1"}
-                missing = [key for key, value in required.items() if values.get(key) != value]
-                if missing:
-                    return False, "Verifikasi service Windows belum lengkap: " + ", ".join(missing), detected_os
-                if values.get("DISK_READY") != "1":
-                    disk_error = values.get("DISK_ERROR") or values.get("DISK_STATE") or "unknown"
-                    return False, "Partisi C belum dapat diperbesar: " + disk_error[:250], detected_os
-        except Exception as exc:
-            return False, f"login Administrator SSH {port} gagal: {str(exc)[:250]}", detected_os
-        finally:
-            if ssh:
-                try:
-                    ssh.close()
-                except Exception:
-                    pass
+if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
+'''.replace(
+            "__REINSTALLOS_FINAL_PASSWORD__",
+            WINDOWS_INSTALL_PASSWORD.replace("'", "''"),
+        )
+        _, stdout, stderr = bootstrap_ssh.exec_command(
+            _powershell_encoded(script), timeout=120
+        )
+        rc, output, error = _read_ssh_streams(stdout, stderr)
+        if rc != 0:
+            return False, error[:300] or "PowerShell verification failed", detected_os
+        values = {}
+        for line in output.splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.strip().split(":", 1)
+            values[key] = value.strip()
+        detected_os = values.get("OS", detected_os)
+        required = {"PORT22": "1", "PORT22022": "1", "RDP_ENABLED": "1"}
+        missing = [key for key, value in required.items() if values.get(key) != value]
+        if missing:
+            return False, "Verifikasi service Windows belum lengkap: " + ", ".join(missing), detected_os
+        if values.get("DISK_READY") != "1":
+            disk_error = values.get("DISK_ERROR") or values.get("DISK_STATE") or "unknown"
+            return False, "Partisi C belum dapat diperbesar: " + disk_error[:250], detected_os
+        if values.get("PASSWORD_READY") != "1":
+            password_error = values.get("PASSWORD_ERROR") or "unknown"
+            return False, "Password Administrator belum dapat diubah: " + password_error[:250], detected_os
+    except Exception as exc:
+        return False, f"Finalisasi Windows gagal: {str(exc)[:250]}", detected_os
+    finally:
+        try:
+            bootstrap_ssh.close()
+        except Exception:
+            pass
+
     if not detected_os:
         return False, "Nama Windows tidak dapat dibaca", ""
+
+    # Do not trust the existing bootstrap session: authenticate both endpoints
+    # again with the final credential before exposing it to the user.
+    for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
+        verify_ssh = None
+        try:
+            verify_ssh = _connect_with_credentials(
+                vps_ip, port, WINDOWS_INSTALL_USER, WINDOWS_INSTALL_PASSWORD
+            )
+            if detect_remote_os_sync(verify_ssh) != "windows":
+                raise RuntimeError("endpoint bukan Windows")
+        except Exception as exc:
+            return False, f"Password baru gagal diverifikasi pada SSH {port}: {str(exc)[:220]}", detected_os
+        finally:
+            if verify_ssh:
+                try:
+                    verify_ssh.close()
+                except Exception:
+                    pass
     return True, "", detected_os[:200]
 
 
@@ -4113,13 +4205,14 @@ async def finish_reinstall_job(
                 "  SSH fallback: port 22\n"
                 f"  RDP: {job['vps_ip']}:3389\n"
                 "  User: Administrator\n"
-                "  Pass: Teddysun.com"
+                f"  Pass: {WINDOWS_INSTALL_PASSWORD}"
             )
             detected = verification or "Windows"
             result_status = (
                 f"  ● OS: {detected}\n"
                 "  ● SSH 22022           READY\n"
                 "  ● SSH 22              READY\n"
+                "  ● Password final      READY\n"
                 "  ● RDP 3389            READY\n"
                 "  ● Disk C              MAXIMUM\n"
                 "  ● Final Check         VERIFIED\n"
