@@ -136,6 +136,7 @@ Pass:         Digicore@1
 | Reinstall OS Dua Arah | Linux → Windows/Linux dan Windows → Windows/Debian/Ubuntu dari menu yang sama |
 | Deteksi OS Otomatis | Mencoba SSH 22022 lebih dahulu lalu 22; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
 | Windows Remote Access | OpenSSH otomatis di port 22022 dan 22, dengan RDP tetap aktif di 3389 |
+| Ekspansi Disk Windows | Partisi sistem C otomatis diperbesar ke kapasitas maksimum yang aman sebelum instalasi dinyatakan selesai |
 | Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
 | Detail Jobs & Akses | Status/tahap/waktu/verifikasi ditampilkan rapi; akses final hanya dibuka setelah konfirmasi dan hanya untuk pemilik job terbaru |
 | SSH Command | Kirim command Bash (Linux) atau PowerShell (Windows) langsung dari Telegram |
@@ -357,7 +358,7 @@ systemctl daemon-reload
 - Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
 - Saat semua slot eksekusi penuh, job baru masuk antrean otomatis; antrean tetap dibatasi agar server bot terlindungi
 - Linux hanya dinyatakan selesai setelah identitas OS, ketersediaan `curl`, dan login `root` pada SSH 22022 + 22 terverifikasi
-- Windows hanya dinyatakan selesai setelah identitas OS, login `Administrator` pada SSH 22022 + 22, dan RDP 3389 terverifikasi
+- Windows hanya dinyatakan selesai setelah identitas OS, login `Administrator` pada SSH 22022 + 22, RDP 3389, dan ekspansi aman partisi C terverifikasi
 - OpenSSH Windows dibundel dari rilis resmi Microsoft Win32-OpenSSH yang dipin dan diverifikasi SHA-256; first boot tidak bergantung pada download OpenSSH
 - Saat reinstall dimulai dari Windows, bootstrap Cygwin diunduh oleh server bot lalu diunggah lewat SFTP; scheduled task tidak bergantung pada `certutil` yang dapat gagal pada sesi non-interaktif
 - Setelah verifikasi sukses, record VPS milik user itu saja diperbarui ke user/port/password target; Jobs tetap tidak menyimpan salinan password

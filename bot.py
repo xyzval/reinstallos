@@ -836,6 +836,7 @@ def get_job_detail_text(job: dict) -> str:
             lines.extend([
                 "  Login Administrator: READY",
                 "  RDP 3389           : READY",
+                "  Disk C             : MAXIMUM",
             ])
         lines.append("  Final Check         : VERIFIED")
         if job_access_available(job):
@@ -3839,22 +3840,78 @@ $caption = (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue)
 if (-not $caption) { $caption = (Get-WmiObject Win32_OperatingSystem).Caption }
 $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
 $rdp = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server').fDenyTSConnections
+$diskReady = 0
+$diskState = 'UNKNOWN'
+$diskError = ''
+$diskBeforeGB = 0
+$diskAfterGB = 0
+try {
+    $driveLetter = $env:SystemDrive.Substring(0, 1)
+    if (-not (Get-Command Get-Partition -ErrorAction SilentlyContinue)) {
+        throw 'Storage cmdlets tidak tersedia'
+    }
+    if (Get-Command Update-HostStorageCache -ErrorAction SilentlyContinue) {
+        Update-HostStorageCache -ErrorAction SilentlyContinue
+    }
+    $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
+    $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
+    $supported = Get-PartitionSupportedSize -DriveLetter $driveLetter -ErrorAction Stop
+    $before = [UInt64]$partition.Size
+    $target = [UInt64]$supported.SizeMax
+    $diskBeforeGB = [math]::Round($before / 1GB, 1)
+    if ($target -gt ($before + 256MB)) {
+        Resize-Partition -DriveLetter $driveLetter -Size $target -ErrorAction Stop
+        Start-Sleep -Seconds 2
+        $diskState = 'EXPANDED'
+    } else {
+        $diskState = 'ALREADY_MAX'
+    }
+    $partition = Get-Partition -DriveLetter $driveLetter -ErrorAction Stop
+    $after = [UInt64]$partition.Size
+    $diskAfterGB = [math]::Round($after / 1GB, 1)
+    $otherBytes = (Get-Partition -DiskNumber $partition.DiskNumber -ErrorAction Stop |
+        Where-Object { $_.PartitionNumber -ne $partition.PartitionNumber } |
+        Measure-Object Size -Sum).Sum
+    if ($null -eq $otherBytes) { $otherBytes = 0 }
+    $unusedBytes = [double]$disk.Size - [double]$otherBytes - [double]$after
+    if ($after -ge ($target - 256MB) -and $unusedBytes -lt 1GB) {
+        $diskReady = 1
+    } else {
+        $diskState = 'BLOCKED'
+        $diskError = 'ruang kosong tidak bersebelahan dengan partisi sistem'
+    }
+} catch {
+    $diskState = 'FAILED'
+    $diskError = ($_.Exception.Message -replace '[\r\n]+', ' ')
+}
 Write-Output "OS:$caption"
 Write-Output "PORT22:$([int](22 -in $ports))"
 Write-Output "PORT22022:$([int](22022 -in $ports))"
 Write-Output "RDP_ENABLED:$([int]($rdp -eq 0))"
+Write-Output "DISK_READY:$diskReady"
+Write-Output "DISK_STATE:$diskState"
+Write-Output "DISK_BEFORE_GB:$diskBeforeGB"
+Write-Output "DISK_AFTER_GB:$diskAfterGB"
+if ($diskError) { Write-Output "DISK_ERROR:$diskError" }
 '''
-                _, stdout, stderr = ssh.exec_command(_powershell_encoded(script), timeout=45)
+                _, stdout, stderr = ssh.exec_command(_powershell_encoded(script), timeout=90)
                 rc, output, error = _read_ssh_streams(stdout, stderr)
                 if rc != 0:
                     return False, error[:300] or "PowerShell verification failed", detected_os
+                values = {}
                 for line in output.splitlines():
-                    if line.startswith("OS:"):
-                        detected_os = line[3:].strip()
-                markers = {line.strip() for line in output.splitlines()}
-                required = {"PORT22:1", "PORT22022:1", "RDP_ENABLED:1"}
-                if not required.issubset(markers):
-                    return False, "Verifikasi service Windows belum lengkap: " + ", ".join(sorted(markers)), detected_os
+                    if ":" not in line:
+                        continue
+                    key, value = line.strip().split(":", 1)
+                    values[key] = value.strip()
+                detected_os = values.get("OS", detected_os)
+                required = {"PORT22": "1", "PORT22022": "1", "RDP_ENABLED": "1"}
+                missing = [key for key, value in required.items() if values.get(key) != value]
+                if missing:
+                    return False, "Verifikasi service Windows belum lengkap: " + ", ".join(missing), detected_os
+                if values.get("DISK_READY") != "1":
+                    disk_error = values.get("DISK_ERROR") or values.get("DISK_STATE") or "unknown"
+                    return False, "Partisi C belum dapat diperbesar: " + disk_error[:250], detected_os
         except Exception as exc:
             return False, f"login Administrator SSH {port} gagal: {str(exc)[:250]}", detected_os
         finally:
@@ -3922,6 +3979,7 @@ async def finish_reinstall_job(
                 "  ● SSH 22022           READY\n"
                 "  ● SSH 22              READY\n"
                 "  ● RDP 3389            READY\n"
+                "  ● Disk C              MAXIMUM\n"
                 "  ● Final Check         VERIFIED\n"
             )
         else:
