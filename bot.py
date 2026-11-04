@@ -171,11 +171,15 @@ LINUX_INSTALL_USER = "root"
 LINUX_INSTALL_PASSWORD = "Digicore@1"
 WINDOWS_INSTALL_USER = "Administrator"
 # Pinned DD images boot with the vendor credential; successful jobs rotate it
-# to the requested final credential and verify both SSH ports again.
+# to the requested final credential and verify an authenticated SSH endpoint.
 WINDOWS_IMAGE_PASSWORD = "Teddysun.com"
 WINDOWS_INSTALL_PASSWORD = "digicore"
+# The installer configures both ports locally. External verification prefers the
+# standard port 22 and uses 22022 only as a fallback because provider firewalls
+# may expose just one of them.
 PRIMARY_SSH_PORT = 22022
 FALLBACK_SSH_PORT = 22
+SSH_ACCESS_PORTS = (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT)
 _ASSET_CACHE = {}
 _ASSET_CACHE_LOCK = threading.Lock()
 
@@ -702,6 +706,14 @@ def get_job_access_text(job: dict) -> str:
         WINDOWS_INSTALL_USER if job.get("os_type") == "windows" else LINUX_INSTALL_USER
     ))
     password = str(credentials.get("vps_pass", "-"))
+    verified_port = int(
+        job.get("verified_ssh_port")
+        or credentials.get("vps_port")
+        or FALLBACK_SSH_PORT
+    )
+    alternate_port = (
+        PRIMARY_SSH_PORT if verified_port == FALLBACK_SSH_PORT else FALLBACK_SSH_PORT
+    )
     lines = [
         "─────────────────────────────",
         "  🔐  Akses VPS Terverifikasi",
@@ -711,11 +723,10 @@ def get_job_access_text(job: dict) -> str:
         "",
         f"  IP VPS: {ip}",
         "",
-        "  SSH utama:",
-        f"  ssh -p 22022 {username}@{ip}",
+        f"  SSH terverifikasi (port {verified_port}):",
+        f"  ssh -p {verified_port} {username}@{ip}",
         "",
-        "  SSH cadangan:",
-        f"  ssh -p 22 {username}@{ip}",
+        f"  Alternatif jika provider mengizinkan: port {alternate_port}",
     ]
     if job.get("os_type") == "windows":
         lines.extend([
@@ -826,9 +837,13 @@ def get_job_detail_text(job: dict) -> str:
     if state == "completed":
         detected = str(job.get("verification") or job.get("os_name") or "-")[:200]
         lines.append(f"  OS terdeteksi       : {detected}")
+        verified_port = int(job.get("verified_ssh_port") or job.get("vps_port") or FALLBACK_SSH_PORT)
+        alternate_port = (
+            PRIMARY_SSH_PORT if verified_port == FALLBACK_SSH_PORT else FALLBACK_SSH_PORT
+        )
         lines.extend([
-            "  SSH 22022          : READY",
-            "  SSH 22             : READY",
+            f"  SSH {verified_port:<14}: READY",
+            f"  SSH {alternate_port:<14}: OPTIONAL",
         ])
         if job.get("os_type") == "linux":
             lines.extend([
@@ -2902,13 +2917,13 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     if os_type == "windows":
         summary += (
             f"\n  🔑 Login: Administrator / {WINDOWS_INSTALL_PASSWORD}\n"
-            "  🔐 SSH: 22022 (utama) + 22\n"
+            "  🔐 SSH: 22 (utama) / 22022 (fallback)\n"
             "  🖥️ RDP: 3389\n"
         )
     else:
         summary += (
             "\n  🔑 Login: root / Digicore@1\n"
-            "  🔐 SSH: 22022 (utama) + 22\n"
+            "  🔐 SSH: 22 (utama) / 22022 (fallback)\n"
         )
     summary += "\n  ⚠️ SEMUA DATA AKAN DIHAPUS!\n"
 
@@ -3291,7 +3306,8 @@ def detect_remote_os_sync(ssh) -> str:
 
 
 def _ssh_ports(data: dict) -> list:
-    ports = [PRIMARY_SSH_PORT, FALLBACK_SSH_PORT]
+    """Return access candidates with port 22 first and 22022 as fallback."""
+    ports = list(SSH_ACCESS_PORTS)
     try:
         stored = int(data.get("vps_port", FALLBACK_SSH_PORT))
         if stored not in ports:
@@ -3326,7 +3342,7 @@ def _ssh_passwords(data: dict) -> list:
 
 
 def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
-    """Connect on 22022 first, then 22, and detect Linux versus Windows."""
+    """Connect on port 22 first, then 22022, and detect Linux or Windows."""
     errors = []
     for port in _ssh_ports(data):
         for username in _ssh_users(data):
@@ -3657,10 +3673,44 @@ def _connect_with_credentials(vps_ip: str, port: int, username: str, password: s
     return ssh
 
 
+def find_working_ssh_port_sync(
+    vps_ip: str,
+    username: str,
+    password: str,
+    expected_os: str,
+    timeout: int = 12,
+) -> tuple:
+    """Return the first authenticated SSH port: 22, then 22022.
+
+    A raw TCP accept is not enough because an upstream firewall/proxy may accept
+    a connection without forwarding an SSH banner to the guest.
+    """
+    errors = []
+    for port in SSH_ACCESS_PORTS:
+        ssh = None
+        try:
+            ssh = _connect_with_credentials(
+                vps_ip, port, username, password, timeout=timeout
+            )
+            remote_os = detect_remote_os_sync(ssh)
+            if remote_os != expected_os:
+                raise RuntimeError(f"endpoint bukan {expected_os}")
+            return port, ""
+        except Exception as exc:
+            errors.append(f"SSH {port}: {str(exc)[:180]}")
+        finally:
+            if ssh:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+    return 0, "; ".join(errors)
+
+
 def probe_linux_os_sync(vps_ip: str) -> tuple:
     """Read the live Linux identity without modifying an installer environment."""
     errors = []
-    for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
+    for port in SSH_ACCESS_PORTS:
         for username in (LINUX_INSTALL_USER, "ubuntu", "debian"):
             ssh = None
             try:
@@ -3701,7 +3751,7 @@ def fix_linux_password_sync(vps_ip: str) -> tuple:
     default_users = [LINUX_INSTALL_USER, "ubuntu", "debian"]
     last_error = "Tidak ada kredensial default installer yang berhasil"
 
-    for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
+    for port in SSH_ACCESS_PORTS:
         for username in default_users:
             for password in default_passwords:
                 ssh = None
@@ -3936,28 +3986,18 @@ grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true
                         except Exception:
                             pass
 
-                # A local sshd restart is not enough: verify both ports from the bot host.
-                verified = True
-                for verify_port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
-                    verify_ssh = None
-                    try:
-                        verify_ssh = _connect_with_credentials(
-                            vps_ip, verify_port, LINUX_INSTALL_USER, LINUX_INSTALL_PASSWORD
-                        )
-                        if detect_remote_os_sync(verify_ssh) != "linux":
-                            raise RuntimeError("OS bukan Linux")
-                    except Exception as exc:
-                        verified = False
-                        last_error = f"verifikasi SSH {verify_port} gagal: {str(exc)[:220]}"
-                        break
-                    finally:
-                        if verify_ssh:
-                            try:
-                                verify_ssh.close()
-                            except Exception:
-                                pass
-                if verified and detected_os:
+                # Local sshd keeps both ports, but external access only needs one.
+                # Verify a real SSH banner, authentication, and OS on 22 first;
+                # use 22022 only when port 22 is unavailable.
+                verified_port, verify_error = find_working_ssh_port_sync(
+                    vps_ip,
+                    LINUX_INSTALL_USER,
+                    LINUX_INSTALL_PASSWORD,
+                    "linux",
+                )
+                if verified_port and detected_os:
                     return True, "", detected_os[:200]
+                last_error = verify_error or "tidak ada endpoint SSH Linux yang dapat diautentikasi"
     return False, last_error, ""
 
 
@@ -3972,14 +4012,14 @@ def windows_os_matches(requested_os: str, detected_os: str) -> bool:
 
 
 def verify_windows_install_sync(vps_ip: str) -> tuple:
-    """Finalize Windows, rotate its password, and verify both SSH ports plus RDP."""
+    """Finalize Windows and verify RDP plus one authenticated SSH endpoint."""
     detected_os = ""
     bootstrap_ssh = None
     bootstrap_errors = []
 
     # A fresh raw DD image may still use its vendor credential. Recovered jobs
     # may already have rotated it, so try the requested final credential first.
-    for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
+    for port in SSH_ACCESS_PORTS:
         for password in (WINDOWS_INSTALL_PASSWORD, WINDOWS_IMAGE_PASSWORD):
             candidate = None
             try:
@@ -4138,28 +4178,20 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
     if not detected_os:
         return False, "Nama Windows tidak dapat dibaca", ""
 
-    # Do not trust the existing bootstrap session: authenticate both endpoints
-    # again with the final credential before exposing it to the user.
-    for port in (PRIMARY_SSH_PORT, FALLBACK_SSH_PORT):
-        verify_ssh = None
-        try:
-            verify_ssh = _connect_with_credentials(
-                vps_ip, port, WINDOWS_INSTALL_USER, WINDOWS_INSTALL_PASSWORD
-            )
-            if detect_remote_os_sync(verify_ssh) != "windows":
-                raise RuntimeError("endpoint bukan Windows")
-        except Exception as exc:
-            return False, f"Password baru gagal diverifikasi pada SSH {port}: {str(exc)[:220]}", detected_os
-        finally:
-            if verify_ssh:
-                try:
-                    verify_ssh.close()
-                except Exception:
-                    pass
+    # Do not trust the bootstrap session. Authenticate the final credential on
+    # port 22 first and fall back to 22022; either one is sufficient.
+    verified_port, verify_error = find_working_ssh_port_sync(
+        vps_ip,
+        WINDOWS_INSTALL_USER,
+        WINDOWS_INSTALL_PASSWORD,
+        "windows",
+    )
+    if not verified_port:
+        return False, "Password baru gagal diverifikasi: " + verify_error[:300], detected_os
     return True, "", detected_os[:200]
 
 
-def update_vps_credentials_after_reinstall(job: dict) -> None:
+def update_vps_credentials_after_reinstall(job: dict, verified_port: int = 0) -> None:
     """Switch that user's isolated VPS record to the verified target credentials."""
     user_id = int(job["user_id"])
     vps_list = load_vps_list(user_id)
@@ -4173,7 +4205,7 @@ def update_vps_credentials_after_reinstall(job: dict) -> None:
         else:
             vps["vps_user"] = LINUX_INSTALL_USER
             vps["vps_pass"] = LINUX_INSTALL_PASSWORD
-        vps["vps_port"] = PRIMARY_SSH_PORT
+        vps["vps_port"] = int(verified_port or job.get("verified_ssh_port") or FALLBACK_SSH_PORT)
         changed = True
         break
     if changed:
@@ -4199,10 +4231,14 @@ async def finish_reinstall_job(
         return
     if status == "completed":
         elapsed_minutes = max(0, int((int(job.get("completed_at", 0)) - int(job.get("started_at", 0))) / 60))
+        verified_port = int(job.get("verified_ssh_port") or FALLBACK_SSH_PORT)
+        alternate_port = (
+            PRIMARY_SSH_PORT if verified_port == FALLBACK_SSH_PORT else FALLBACK_SSH_PORT
+        )
         if job.get("os_type") == "windows":
             login = (
-                f"  SSH: ssh -p 22022 Administrator@{job['vps_ip']}\n"
-                "  SSH fallback: port 22\n"
+                f"  SSH: ssh -p {verified_port} Administrator@{job['vps_ip']}\n"
+                f"  SSH alternatif: port {alternate_port} (opsional)\n"
                 f"  RDP: {job['vps_ip']}:3389\n"
                 "  User: Administrator\n"
                 f"  Pass: {WINDOWS_INSTALL_PASSWORD}"
@@ -4210,8 +4246,8 @@ async def finish_reinstall_job(
             detected = verification or "Windows"
             result_status = (
                 f"  ● OS: {detected}\n"
-                "  ● SSH 22022           READY\n"
-                "  ● SSH 22              READY\n"
+                f"  ● SSH {verified_port:<15} READY\n"
+                f"  ● SSH {alternate_port:<15} OPTIONAL\n"
                 "  ● Password final      READY\n"
                 "  ● RDP 3389            READY\n"
                 "  ● Disk C              MAXIMUM\n"
@@ -4219,16 +4255,16 @@ async def finish_reinstall_job(
             )
         else:
             login = (
-                f"  Host: ssh -p 22022 root@{job['vps_ip']}\n"
-                "  Fallback port: 22\n"
+                f"  Host: ssh -p {verified_port} root@{job['vps_ip']}\n"
+                f"  Port alternatif: {alternate_port} (opsional)\n"
                 "  User: root\n"
                 "  Pass: Digicore@1"
             )
             detected = verification or "Linux dan SSH siap"
             result_status = (
                 f"  ● OS: {detected}\n"
-                "  ● SSH 22022           READY\n"
-                "  ● SSH 22              READY\n"
+                f"  ● SSH {verified_port:<15} READY\n"
+                f"  ● SSH {alternate_port:<15} OPTIONAL\n"
                 "  ● Root Login          READY\n"
                 "  ● curl                READY\n"
                 "  ● Disk root           MAXIMUM\n"
@@ -4308,7 +4344,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
         )
         if current.get("os_type") == "windows":
             rdp_open = await is_port_open(vps_ip, 3389)
-            target_open = ssh_22022_open and ssh_22_open and rdp_open
+            target_open = (ssh_22_open or ssh_22022_open) and rdp_open
         else:
             target_open = ssh_22022_open or ssh_22_open
         ready_for_verification = target_open and (
@@ -4351,7 +4387,26 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                         verification=detected_os,
                     )
                     return
-                update_vps_credentials_after_reinstall(current)
+                verified_port, access_error = await asyncio.to_thread(
+                    find_working_ssh_port_sync,
+                    vps_ip,
+                    WINDOWS_INSTALL_USER,
+                    WINDOWS_INSTALL_PASSWORD,
+                    "windows",
+                )
+                if not verified_port:
+                    await finish_reinstall_job(
+                        application,
+                        job_id,
+                        "failed",
+                        "Kredensial final tidak dapat diverifikasi: " + access_error,
+                        verification=detected_os,
+                    )
+                    return
+                current = update_reinstall_job(
+                    job_id, verified_ssh_port=verified_port
+                ) or current
+                update_vps_credentials_after_reinstall(current, verified_port)
                 await finish_reinstall_job(
                     application,
                     job_id,
@@ -4381,7 +4436,26 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                         verification=detected_os,
                     )
                     return
-                update_vps_credentials_after_reinstall(current)
+                verified_port, access_error = await asyncio.to_thread(
+                    find_working_ssh_port_sync,
+                    vps_ip,
+                    LINUX_INSTALL_USER,
+                    LINUX_INSTALL_PASSWORD,
+                    "linux",
+                )
+                if not verified_port:
+                    await finish_reinstall_job(
+                        application,
+                        job_id,
+                        "failed",
+                        "Kredensial final tidak dapat diverifikasi: " + access_error,
+                        verification=detected_os,
+                    )
+                    return
+                current = update_reinstall_job(
+                    job_id, verified_ssh_port=verified_port
+                ) or current
+                update_vps_credentials_after_reinstall(current, verified_port)
                 await finish_reinstall_job(
                     application,
                     job_id,

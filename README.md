@@ -1,6 +1,6 @@
 # Reinstall OS - by xyzval
 
-Script dan Telegram Bot untuk reinstall VPS dua arah—**Linux ↔ Windows**—secara otomatis, dengan SSH 22022 + 22 dan RDP 3389 tetap tersedia setelah instalasi.
+Script dan Telegram Bot untuk reinstall VPS dua arah—**Linux ↔ Windows**—secara otomatis, dengan SSH 22/22022 (salah satu cukup untuk akses eksternal) dan RDP 3389 tetap tersedia setelah instalasi.
 
 ---
 
@@ -134,16 +134,16 @@ Pass:         Digicore@1
 | Owner & User | Owner menambah, menonaktifkan, dan mencabut akses user |
 | Masa Berlaku User | Pilihan 1/7/30 hari, manual 1–3650 hari, atau permanen; akses otomatis ditolak saat kedaluwarsa |
 | Reinstall OS Dua Arah | Linux → Windows/Linux dan Windows → Windows/Debian/Ubuntu dari menu yang sama |
-| Deteksi OS Otomatis | Mencoba SSH 22022 lebih dahulu lalu 22; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
-| Windows Remote Access | OpenSSH otomatis di port 22022 dan 22, dengan RDP tetap aktif di 3389 |
-| Password Final Windows | Kredensial image hanya dipakai saat bootstrap, lalu password `Administrator` dirotasi ke `digicore` dan diuji ulang pada kedua port SSH |
+| Deteksi OS Otomatis | Mencoba SSH 22 lebih dahulu lalu 22022 sebagai fallback; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
+| Windows Remote Access | OpenSSH dikonfigurasi lokal di port 22 dan 22022, dengan RDP tetap aktif di 3389; provider hanya perlu meneruskan salah satu port SSH |
+| Password Final Windows | Kredensial image hanya dipakai saat bootstrap, lalu password `Administrator` dirotasi ke `digicore` dan diuji ulang melalui port 22 atau fallback 22022 |
 | Ekspansi Disk Otomatis | Partisi C Windows dan filesystem root Linux otomatis diperbesar ke kapasitas maksimum yang aman sebelum instalasi dinyatakan selesai |
 | Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
 | Detail Jobs & Akses | Status/tahap/waktu/verifikasi ditampilkan rapi; akses final hanya dibuka setelah konfirmasi dan hanya untuk pemilik job terbaru |
 | SSH Command | Kirim command Bash (Linux) atau PowerShell (Windows) langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime pada Linux maupun Windows |
 | Reboot | Restart VPS Linux maupun Windows dari Telegram |
-| Status Check | Tombol Status dan `/ping` sama-sama mengecek ICMP, SSH 22, SSH 22022, dan RDP 3389 |
+| Status Check | Tombol Status dan `/ping` mengecek ICMP, SSH 22, SSH 22022, dan RDP 3389; VPS dianggap dapat diakses jika salah satu endpoint SSH bekerja |
 | Open All Port | Buka firewall OS dengan konfirmasi 2 tahap, backup, dan verifikasi |
 | Edit Port | Tambah port SSH, pertahankan port lama, validasi, tes koneksi, dan rollback otomatis |
 | Edit Password | Ganti password `root` di Linux atau `Administrator` di Windows melalui SSH |
@@ -273,7 +273,7 @@ Windows 11, serta Server 2012 R2, 2016, 2019, dan 2022 sudah terverifikasi
 end-to-end sampai kembali ke Debian 12. Image tidak aktif secara otomatis;
 gunakan product key Windows yang sah bila diperlukan.
 
-**Login via SSH port 22022 (utama), SSH port 22 (fallback), atau RDP port 3389.**
+**Login via SSH port 22 (utama), SSH port 22022 (fallback bila diperlukan), atau RDP port 3389.**
 
 > `digicore` adalah password sederhana sesuai konfigurasi yang diminta. Jika sebuah Windows Server menolak password huruf kecil, bot melonggarkan kebijakan kompleksitas lokal sebelum mencoba kembali. Batasi akses RDP/SSH menggunakan firewall provider bila VPS berada di internet publik.
 
@@ -286,7 +286,7 @@ gunakan product key Windows yang sah bila diperlukan.
 | CentOS 9 Stream | root / Digicore@1 |
 | AlmaLinux 9 | root / Digicore@1 |
 
-**Login via SSH port 22022 (utama) atau port 22 (fallback).**
+**Login via SSH port 22 (utama) atau port 22022 sebagai fallback.**
 
 ---
 
@@ -360,8 +360,8 @@ systemctl daemon-reload
 - Detail akses final memerlukan konfirmasi, hanya dapat dibuka pemilik job, dan hanya tersedia pada job terbaru VPS agar kredensial lama tidak menyesatkan
 - Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
 - Saat semua slot eksekusi penuh, job baru masuk antrean otomatis; antrean tetap dibatasi agar server bot terlindungi
-- Linux hanya dinyatakan selesai setelah identitas OS, ekspansi aman filesystem root, ketersediaan `curl`, dan login `root` pada SSH 22022 + 22 terverifikasi
-- Windows hanya dinyatakan selesai setelah identitas OS, password final `Administrator` pada SSH 22022 + 22, RDP 3389, dan ekspansi aman partisi C terverifikasi
+- Linux hanya dinyatakan selesai setelah identitas OS, ekspansi aman filesystem root, ketersediaan `curl`, dan login `root` terverifikasi melalui SSH 22 atau fallback 22022
+- Windows hanya dinyatakan selesai setelah identitas OS, password final `Administrator` terverifikasi melalui SSH 22 atau fallback 22022, RDP 3389 aktif, dan ekspansi aman partisi C terverifikasi
 - OpenSSH Windows dibundel dari rilis resmi Microsoft Win32-OpenSSH yang dipin dan diverifikasi SHA-256; first boot tidak bergantung pada download OpenSSH
 - Saat reinstall dimulai dari Windows, bootstrap Cygwin diunduh oleh server bot lalu diunggah lewat SFTP; scheduled task tidak bergantung pada `certutil` yang dapat gagal pada sesi non-interaktif
 - Setelah verifikasi sukses, record VPS milik user itu saja diperbarui ke user/port/password target; Jobs tetap tidak menyimpan salinan password
