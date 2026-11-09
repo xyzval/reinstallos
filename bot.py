@@ -174,12 +174,13 @@ WINDOWS_INSTALL_USER = "Administrator"
 # to the requested final credential and verify an authenticated SSH endpoint.
 WINDOWS_IMAGE_PASSWORD = "Teddysun.com"
 WINDOWS_INSTALL_PASSWORD = "digicore"
-# The installer configures both ports locally. External verification prefers the
-# standard port 22 and uses 22022 only as a fallback because provider firewalls
-# may expose just one of them.
+# The installer configures 22/22022 and retains a saved custom port. External
+# verification accepts one authenticated endpoint; 443 supports UpCloud trial
+# networks that block inter-VPS TCP on the standard SSH ports.
 PRIMARY_SSH_PORT = 22022
 FALLBACK_SSH_PORT = 22
-SSH_ACCESS_PORTS = (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT)
+UPCLOUD_TRIAL_SSH_PORT = 443
+SSH_ACCESS_PORTS = (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT, UPCLOUD_TRIAL_SSH_PORT)
 _ASSET_CACHE = {}
 _ASSET_CACHE_LOCK = threading.Lock()
 
@@ -1992,12 +1993,12 @@ async def handle_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if action == "act_status":
         vps_ip = data["vps_ip"]
         await query.edit_message_text(f"  📡 Checking {vps_ip}...")
-        ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok = await check_vps_connectivity(vps_ip)
+        status_result = await check_vps_connectivity(
+            vps_ip, data.get("vps_port", 0)
+        )
         keyboard = [[InlineKeyboardButton("◀️ Kembali", callback_data="act_back_menu")]]
         await query.edit_message_text(
-            get_connectivity_status_text(
-                vps_ip, ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok
-            ),
+            get_connectivity_status_text(vps_ip, *status_result),
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return SELECT_VPS_ACTION
@@ -2914,16 +2915,22 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
     )
     if data.get("lang"):
         summary += f"  🌐 {LANG_OPTIONS.get(data['lang'], '')}\n"
+    saved_port = int(data.get("vps_port") or FALLBACK_SSH_PORT)
+    ssh_summary = (
+        f"{saved_port} (tersimpan) + 22/22022"
+        if saved_port not in (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT)
+        else "22 (utama) / 22022 (fallback)"
+    )
     if os_type == "windows":
         summary += (
             f"\n  🔑 Login: Administrator / {WINDOWS_INSTALL_PASSWORD}\n"
-            "  🔐 SSH: 22 (utama) / 22022 (fallback)\n"
+            f"  🔐 SSH: {ssh_summary}\n"
             "  🖥️ RDP: 3389\n"
         )
     else:
         summary += (
             "\n  🔑 Login: root / Digicore@1\n"
-            "  🔐 SSH: 22 (utama) / 22022 (fallback)\n"
+            f"  🔐 SSH: {ssh_summary}\n"
         )
     summary += "\n  ⚠️ SEMUA DATA AKAN DIHAPUS!\n"
 
@@ -3075,9 +3082,22 @@ def _download_asset(url: str, expected_sha256: str = "", max_bytes: int = 8 * 10
     return data
 
 
-def _windows_openssh_trans_snippet() -> str:
-    """Code inserted into upstream trans.sh's modify_windows function."""
-    return r'''
+def _windows_openssh_trans_snippet(extra_ssh_port: int = 0) -> str:
+    """Code inserted into trans.sh, retaining an optional custom SSH port."""
+    try:
+        extra_port = int(extra_ssh_port or 0)
+    except (TypeError, ValueError):
+        extra_port = 0
+    if extra_port in (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT) or not (1 <= extra_port <= 65535):
+        extra_port = 0
+    extra_config = f"        'Port {extra_port}'\n" if extra_port else ""
+    extra_rule = (
+        f"        @{{Name='ReinstallOS-SSH-{extra_port}'; Port={extra_port}}},\n"
+        if extra_port else ""
+    )
+    extra_condition = f" -or {extra_port} -notin $listening" if extra_port else ""
+    ready_ports = f"22,22022,{extra_port}" if extra_port else "22,22022"
+    snippet = r'''
     # ReinstallOS: provision final Windows OpenSSH without relying on first-boot downloads.
     if [ -f /configs/windows-openssh.zip ]; then
         rm -rf "$os_dir/Program Files/OpenSSH-Win64"
@@ -3115,7 +3135,7 @@ try {
     @(
         'Port 22022'
         'Port 22'
-        'PasswordAuthentication yes'
+__REINSTALLOS_EXTRA_CONFIG__        'PasswordAuthentication yes'
     ) + $filtered | Set-Content -Path $config -Encoding ascii
 
     # Older Windows releases do not generate host keys automatically, and
@@ -3135,7 +3155,7 @@ try {
     foreach ($rule in @(
         @{Name='ReinstallOS-SSH-22'; Port=22},
         @{Name='ReinstallOS-SSH-22022'; Port=22022},
-        @{Name='ReinstallOS-RDP-3389'; Port=3389}
+__REINSTALLOS_EXTRA_RULE__        @{Name='ReinstallOS-RDP-3389'; Port=3389}
     )) {
         Remove-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue
         New-NetFirewallRule -Name $rule.Name -DisplayName $rule.Name -Enabled True `
@@ -3181,11 +3201,11 @@ try {
 
     $listening = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty LocalPort
-    if (22 -notin $listening -or 22022 -notin $listening) {
-        throw "sshd is not listening on both ports; listening=$($listening -join ',')"
+    if (22 -notin $listening -or 22022 -notin $listening__REINSTALLOS_EXTRA_CONDITION__) {
+        throw "sshd is not listening on required ports; listening=$($listening -join ',')"
     }
     cmd.exe /d /c 'schtasks.exe /Delete /TN ReinstallOS-OpenSSH /F >NUL 2>&1' | Out-Null
-    "$(Get-Date -Format o) OPENSSH_READY ports=22,22022 rdp=3389" |
+    "$(Get-Date -Format o) OPENSSH_READY ports=__REINSTALLOS_READY_PORTS__ rdp=3389" |
         Out-File -FilePath $LogFile -Append -Encoding ascii
     exit 0
 } catch {
@@ -3208,16 +3228,24 @@ REINSTALLOS_CMD
         error_and_exit "Missing /configs/windows-openssh.zip"
     fi
 '''.strip("\n")
+    return (snippet
+        .replace("__REINSTALLOS_EXTRA_CONFIG__", extra_config)
+        .replace("__REINSTALLOS_EXTRA_RULE__", extra_rule)
+        .replace("__REINSTALLOS_EXTRA_CONDITION__", extra_condition)
+        .replace("__REINSTALLOS_READY_PORTS__", ready_ports)
+    )
 
 
-def build_patched_reinstall_script(upstream: bytes) -> bytes:
+def build_patched_reinstall_script(upstream: bytes, extra_ssh_port: int = 0) -> bytes:
     """Inject a pinned OpenSSH payload hook before upstream rebuilds its initrd."""
     text = upstream.decode("utf-8")
     needle = "    chmod a+x $initrd_dir/trans.sh $initrd_dir/initrd-network.sh\n"
     if text.count(needle) != 1:
         raise RuntimeError("Format reinstall.sh upstream berubah; patch Windows dibatalkan dengan aman")
 
-    snippet_b64 = base64.b64encode(_windows_openssh_trans_snippet().encode()).decode()
+    snippet_b64 = base64.b64encode(
+        _windows_openssh_trans_snippet(extra_ssh_port).encode()
+    ).decode()
     hook = rf'''
 
     # ReinstallOS: bundle and inject final-Windows OpenSSH before initrd repacking.
@@ -3305,16 +3333,24 @@ def detect_remote_os_sync(ssh) -> str:
     raise RuntimeError("OS remote tidak dapat dideteksi sebagai Linux atau Windows")
 
 
-def _ssh_ports(data: dict) -> list:
-    """Return access candidates with port 22 first and 22022 as fallback."""
-    ports = list(SSH_ACCESS_PORTS)
+def _ordered_ssh_ports(preferred_port: int = 0) -> list:
+    """Prefer the saved endpoint, then try 22, 22022, and UpCloud port 443."""
+    ports = []
     try:
-        stored = int(data.get("vps_port", FALLBACK_SSH_PORT))
-        if stored not in ports:
-            ports.append(stored)
+        preferred = int(preferred_port or 0)
     except (TypeError, ValueError):
-        pass
+        preferred = 0
+    if 1 <= preferred <= 65535:
+        ports.append(preferred)
+    for port in SSH_ACCESS_PORTS:
+        if port not in ports:
+            ports.append(port)
     return ports
+
+
+def _ssh_ports(data: dict) -> list:
+    """Use the user's saved port first so blocked standard ports do not delay actions."""
+    return _ordered_ssh_ports(data.get("vps_port", FALLBACK_SSH_PORT))
 
 
 def _ssh_users(data: dict) -> list:
@@ -3405,8 +3441,18 @@ def _sftp_put_bytes(ssh, remote_path: str, payload: bytes, mode: int = None) -> 
         sftp.close()
 
 
+def _requested_install_ssh_port(data: dict) -> int:
+    """Retain a custom saved port (notably 443 on UpCloud trial VPS)."""
+    try:
+        port = int(data.get("vps_port", PRIMARY_SSH_PORT))
+    except (TypeError, ValueError):
+        port = PRIMARY_SSH_PORT
+    return port if port not in (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT) else PRIMARY_SSH_PORT
+
+
 def _installer_arguments(data: dict) -> list:
     args = shlex.split(str(data["os_cmd"]))
+    install_ssh_port = _requested_install_ssh_port(data)
     if data["os_type"] == "windows":
         selected_language = str(data.get("lang") or "en").lower()
         language = {"jp": "ja"}.get(selected_language, selected_language)
@@ -3427,7 +3473,7 @@ def _installer_arguments(data: dict) -> list:
             "--lang", language,
             "--username", WINDOWS_INSTALL_USER,
             "--password", WINDOWS_INSTALL_PASSWORD,
-            "--ssh-port", str(PRIMARY_SSH_PORT),
+            "--ssh-port", str(install_ssh_port),
             "--rdp-port", "3389",
             "--allow-ping",
         ])
@@ -3435,19 +3481,19 @@ def _installer_arguments(data: dict) -> list:
         args.extend([
             "--username", LINUX_INSTALL_USER,
             "--password", LINUX_INSTALL_PASSWORD,
-            "--ssh-port", str(PRIMARY_SSH_PORT),
+            "--ssh-port", str(install_ssh_port),
         ])
     return args
 
 
-def _prepare_installer_assets(target_windows: bool) -> tuple:
+def _prepare_installer_assets(target_windows: bool, extra_ssh_port: int = 0) -> tuple:
     reinstall_sh = _download_asset(REINSTALL_SH_URL, max_bytes=512 * 1024)
     reinstall_bat = build_patched_reinstall_batch(
         _download_asset(REINSTALL_BAT_URL, max_bytes=128 * 1024)
     )
     openssh_zip = b""
     if target_windows:
-        reinstall_sh = build_patched_reinstall_script(reinstall_sh)
+        reinstall_sh = build_patched_reinstall_script(reinstall_sh, extra_ssh_port)
         openssh_zip = _download_asset(
             WINDOWS_OPENSSH_URL,
             expected_sha256=WINDOWS_OPENSSH_SHA256,
@@ -3552,7 +3598,8 @@ def launch_reinstall_sync(data: dict, stage_callback=None) -> tuple:
         )
         report("downloading")
         reinstall_sh, reinstall_bat, openssh_zip = _prepare_installer_assets(
-            data.get("os_type") == "windows"
+            data.get("os_type") == "windows",
+            _requested_install_ssh_port(data),
         )
         report("launching")
         if source_os == "windows":
@@ -3595,8 +3642,8 @@ async def is_ssh_service_open(ip: str, port: int, timeout: int = 5) -> bool:
     return await asyncio.to_thread(probe)
 
 
-async def check_vps_connectivity(vps_ip: str) -> tuple:
-    """Use one shared ICMP/SSH/RDP check for both Status and /ping."""
+async def check_vps_connectivity(vps_ip: str, preferred_ssh_port: int = 0) -> tuple:
+    """Check ICMP, authenticated-protocol candidates, and RDP reachability."""
     proc = await asyncio.create_subprocess_exec(
         "ping", "-c", "3", "-W", "3", vps_ip,
         stdout=asyncio.subprocess.PIPE,
@@ -3604,16 +3651,29 @@ async def check_vps_connectivity(vps_ip: str) -> tuple:
     )
     await proc.communicate()
     ping_ok = proc.returncode == 0
-    port_results = await asyncio.gather(
-        is_port_open(vps_ip, 22, timeout=3),
-        is_port_open(vps_ip, 22022, timeout=3),
-        is_port_open(vps_ip, 3389, timeout=3),
-        return_exceptions=True,
-    )
-    ssh_22_ok = port_results[0] is True
-    ssh_22022_ok = port_results[1] is True
-    rdp_ok = port_results[2] is True
-    return ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok
+    try:
+        custom_port = int(preferred_ssh_port or 0)
+    except (TypeError, ValueError):
+        custom_port = 0
+    if custom_port in (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT) or not (1 <= custom_port <= 65535):
+        custom_port = 0
+    probes = [
+        is_ssh_service_open(vps_ip, FALLBACK_SSH_PORT, timeout=3),
+        is_ssh_service_open(vps_ip, PRIMARY_SSH_PORT, timeout=3),
+    ]
+    if custom_port:
+        probes.append(is_ssh_service_open(vps_ip, custom_port, timeout=3))
+    probes.append(is_port_open(vps_ip, 3389, timeout=3))
+    results = await asyncio.gather(*probes, return_exceptions=True)
+    ssh_22_ok = results[0] is True
+    ssh_22022_ok = results[1] is True
+    if custom_port:
+        custom_ok = results[2] is True
+        rdp_ok = results[3] is True
+    else:
+        custom_ok = False
+        rdp_ok = results[2] is True
+    return ping_ok, ssh_22_ok, ssh_22022_ok, custom_port, custom_ok, rdp_ok
 
 
 def get_connectivity_status_text(
@@ -3621,16 +3681,22 @@ def get_connectivity_status_text(
     ping_ok: bool,
     ssh_22_ok: bool,
     ssh_22022_ok: bool,
+    custom_port: int,
+    custom_ok: bool,
     rdp_ok: bool,
 ) -> str:
     ping_txt = "✅ ONLINE" if ping_ok else "❌ OFFLINE"
     ssh_22_txt = "✅ OPEN" if ssh_22_ok else "❌ CLOSED"
     ssh_22022_txt = "✅ OPEN" if ssh_22022_ok else "❌ CLOSED"
+    custom_txt = "✅ OPEN" if custom_ok else "❌ CLOSED"
     rdp_txt = "✅ OPEN" if rdp_ok else "❌ CLOSED"
     overall = (
         "✅ VPS ONLINE"
-        if ping_ok or ssh_22_ok or ssh_22022_ok or rdp_ok
+        if ping_ok or ssh_22_ok or ssh_22022_ok or custom_ok or rdp_ok
         else "❌ VPS OFFLINE"
+    )
+    custom_line = (
+        f"  🔐 SSH {custom_port}:   {custom_txt}\n" if custom_port else ""
     )
     return (
         "─────────────────────────────\n"
@@ -3642,6 +3708,7 @@ def get_connectivity_status_text(
         f"  🏓 Ping (ICMP): {ping_txt}\n"
         f"  🔐 SSH 22:      {ssh_22_txt}\n"
         f"  🔐 SSH 22022:   {ssh_22022_txt}\n"
+        f"{custom_line}"
         f"  🖥️ RDP 3389:     {rdp_txt}\n"
         "─────────────────────────────"
     )
@@ -3679,14 +3746,15 @@ def find_working_ssh_port_sync(
     password: str,
     expected_os: str,
     timeout: int = 12,
+    preferred_port: int = 0,
 ) -> tuple:
-    """Return the first authenticated SSH port: 22, then 22022.
+    """Return the first authenticated endpoint, preferring the saved port.
 
     A raw TCP accept is not enough because an upstream firewall/proxy may accept
     a connection without forwarding an SSH banner to the guest.
     """
     errors = []
-    for port in SSH_ACCESS_PORTS:
+    for port in _ordered_ssh_ports(preferred_port):
         ssh = None
         try:
             ssh = _connect_with_credentials(
@@ -3707,10 +3775,10 @@ def find_working_ssh_port_sync(
     return 0, "; ".join(errors)
 
 
-def probe_linux_os_sync(vps_ip: str) -> tuple:
-    """Read the live Linux identity without modifying an installer environment."""
+def probe_linux_os_sync(vps_ip: str, preferred_port: int = 0) -> tuple:
+    """Read live Linux identity, preferring the saved/custom SSH endpoint."""
     errors = []
-    for port in SSH_ACCESS_PORTS:
+    for port in _ordered_ssh_ports(preferred_port):
         for username in (LINUX_INSTALL_USER, "ubuntu", "debian"):
             ssh = None
             try:
@@ -3741,8 +3809,8 @@ def probe_linux_os_sync(vps_ip: str) -> tuple:
     return False, "; ".join(errors[-4:]), ""
 
 
-def fix_linux_password_sync(vps_ip: str) -> tuple:
-    """Verify Linux, install curl, establish root login, and retain both SSH ports."""
+def fix_linux_password_sync(vps_ip: str, preferred_port: int = 0) -> tuple:
+    """Finalize Linux and retain 22, 22022, plus an optional custom SSH port."""
     default_passwords = [
         LINUX_INSTALL_PASSWORD, WINDOWS_INSTALL_PASSWORD,
         "Bolehtuh1", "LeitboGi0662",
@@ -3751,7 +3819,15 @@ def fix_linux_password_sync(vps_ip: str) -> tuple:
     default_users = [LINUX_INSTALL_USER, "ubuntu", "debian"]
     last_error = "Tidak ada kredensial default installer yang berhasil"
 
-    for port in SSH_ACCESS_PORTS:
+    custom_port = 0
+    try:
+        candidate_port = int(preferred_port or 0)
+        if candidate_port not in (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT) and 1 <= candidate_port <= 65535:
+            custom_port = candidate_port
+    except (TypeError, ValueError):
+        pass
+
+    for port in _ordered_ssh_ports(preferred_port):
         for username in default_users:
             for password in default_passwords:
                 ssh = None
@@ -3940,18 +4016,18 @@ fi
 $SUDO tee /etc/ssh/sshd_config.d/99-reinstallos-access.conf >/dev/null <<'EOF'
 Port 22022
 Port 22
-PermitRootLogin yes
+__REINSTALLOS_EXTRA_PORT_LINE__PermitRootLogin yes
 PasswordAuthentication yes
 EOF
 $SUDO sshd -t
 if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -qi '^Status: active'; then
     $SUDO ufw allow 22/tcp >/dev/null
     $SUDO ufw allow 22022/tcp >/dev/null
-fi
+__REINSTALLOS_EXTRA_UFW__fi
 if command -v firewall-cmd >/dev/null 2>&1 && $SUDO systemctl is-active --quiet firewalld; then
     $SUDO firewall-cmd --permanent --add-port=22/tcp >/dev/null
     $SUDO firewall-cmd --permanent --add-port=22022/tcp >/dev/null
-    $SUDO firewall-cmd --reload >/dev/null
+__REINSTALLOS_EXTRA_FIREWALLD__    $SUDO firewall-cmd --reload >/dev/null
 fi
 if $SUDO systemctl is-active --quiet ssh.socket 2>/dev/null || $SUDO systemctl is-enabled --quiet ssh.socket 2>/dev/null; then
     $SUDO systemctl disable --now ssh.socket >/dev/null 2>&1 || true
@@ -3962,6 +4038,18 @@ printf 'REINSTALLOS_CURL_READY\n'
 printf 'REINSTALLOS_LINUX_READY\n'
 grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true
 '''
+                    if custom_port:
+                        fix_commands = (fix_commands
+                            .replace("__REINSTALLOS_EXTRA_PORT_LINE__", f"Port {custom_port}\n")
+                            .replace("__REINSTALLOS_EXTRA_UFW__", f"    $SUDO ufw allow {custom_port}/tcp >/dev/null\n")
+                            .replace("__REINSTALLOS_EXTRA_FIREWALLD__", f"    $SUDO firewall-cmd --permanent --add-port={custom_port}/tcp >/dev/null\n")
+                        )
+                    else:
+                        fix_commands = (fix_commands
+                            .replace("__REINSTALLOS_EXTRA_PORT_LINE__", "")
+                            .replace("__REINSTALLOS_EXTRA_UFW__", "")
+                            .replace("__REINSTALLOS_EXTRA_FIREWALLD__", "")
+                        )
                     _, stdout, stderr = ssh.exec_command(fix_commands, timeout=600)
                     rc, output, error = _read_ssh_streams(stdout, stderr)
                     required_markers = {
@@ -3994,6 +4082,7 @@ grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null || true
                     LINUX_INSTALL_USER,
                     LINUX_INSTALL_PASSWORD,
                     "linux",
+                    preferred_port=preferred_port,
                 )
                 if verified_port and detected_os:
                     return True, "", detected_os[:200]
@@ -4011,15 +4100,15 @@ def windows_os_matches(requested_os: str, detected_os: str) -> bool:
     return bool(versions and f"windows {versions[0]}" in detected)
 
 
-def verify_windows_install_sync(vps_ip: str) -> tuple:
-    """Finalize Windows and verify RDP plus one authenticated SSH endpoint."""
+def verify_windows_install_sync(vps_ip: str, preferred_port: int = 0) -> tuple:
+    """Finalize Windows, retaining a custom SSH port such as UpCloud 443."""
     detected_os = ""
     bootstrap_ssh = None
     bootstrap_errors = []
 
     # A fresh raw DD image may still use its vendor credential. Recovered jobs
     # may already have rotated it, so try the requested final credential first.
-    for port in SSH_ACCESS_PORTS:
+    for port in _ordered_ssh_ports(preferred_port):
         for password in (WINDOWS_INSTALL_PASSWORD, WINDOWS_IMAGE_PASSWORD):
             candidate = None
             try:
@@ -4132,6 +4221,7 @@ if ($servicesReady -eq 1 -and $diskReady -eq 1) {
 Write-Output "OS:$caption"
 Write-Output "PORT22:$([int](22 -in $ports))"
 Write-Output "PORT22022:$([int](22022 -in $ports))"
+Write-Output "PORTCUSTOM:$([int](__REINSTALLOS_CUSTOM_PORT__ -in $ports))"
 Write-Output "RDP_ENABLED:$([int]($rdp -eq 0))"
 Write-Output "DISK_READY:$diskReady"
 Write-Output "DISK_STATE:$diskState"
@@ -4143,6 +4233,9 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
 '''.replace(
             "__REINSTALLOS_FINAL_PASSWORD__",
             WINDOWS_INSTALL_PASSWORD.replace("'", "''"),
+        ).replace(
+            "__REINSTALLOS_CUSTOM_PORT__",
+            str(int(preferred_port or FALLBACK_SSH_PORT)),
         )
         _, stdout, stderr = bootstrap_ssh.exec_command(
             _powershell_encoded(script), timeout=120
@@ -4158,6 +4251,8 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
             values[key] = value.strip()
         detected_os = values.get("OS", detected_os)
         required = {"PORT22": "1", "PORT22022": "1", "RDP_ENABLED": "1"}
+        if int(preferred_port or 0) not in (0, FALLBACK_SSH_PORT, PRIMARY_SSH_PORT):
+            required["PORTCUSTOM"] = "1"
         missing = [key for key, value in required.items() if values.get(key) != value]
         if missing:
             return False, "Verifikasi service Windows belum lengkap: " + ", ".join(missing), detected_os
@@ -4185,6 +4280,7 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
         WINDOWS_INSTALL_USER,
         WINDOWS_INSTALL_PASSWORD,
         "windows",
+        preferred_port=preferred_port,
     )
     if not verified_port:
         return False, "Password baru gagal diverifikasi: " + verify_error[:300], detected_os
@@ -4338,15 +4434,14 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             offline_seen = True
             update_reinstall_job(job_id, offline_seen=True)
 
-        ssh_22022_open, ssh_22_open = await asyncio.gather(
-            is_ssh_service_open(vps_ip, PRIMARY_SSH_PORT),
-            is_ssh_service_open(vps_ip, FALLBACK_SSH_PORT),
-        )
-        if current.get("os_type") == "windows":
-            rdp_open = await is_port_open(vps_ip, 3389)
-            target_open = (ssh_22_open or ssh_22022_open) and rdp_open
-        else:
-            target_open = ssh_22022_open or ssh_22_open
+        monitor_ports = _ordered_ssh_ports(old_port)
+        ssh_results = await asyncio.gather(*[
+            is_ssh_service_open(vps_ip, port) for port in monitor_ports
+        ])
+        target_open = any(ssh_results)
+        # RDP may be blocked between UpCloud trial VPSs. Windows finalization
+        # verifies the RDP service locally after authenticated SSH succeeds.
+        rdp_open = await is_port_open(vps_ip, 3389) if current.get("os_type") == "windows" else False
         ready_for_verification = target_open and (
             offline_seen or (recovered and elapsed >= 5 * 60)
         )
@@ -4362,22 +4457,26 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             target_online_since = 0
             current = update_reinstall_job(job_id, target_online_since=0) or current
 
-        # Give SSH/RDP a short stabilization window before authenticating.
+        # Give the final SSH endpoint a short stabilization window before authenticating.
         if ready_for_verification and int(_time.time()) - target_online_since >= 45:
             if current.get("os_type") == "windows":
                 verify_success, verify_error, detected_os = await asyncio.to_thread(
                     verify_windows_install_sync,
                     vps_ip,
+                    old_port,
                 )
                 if not verify_success:
-                    await finish_reinstall_job(
-                        application,
-                        job_id,
-                        "failed",
-                        "Port Windows sudah terbuka, tetapi login/service belum terverifikasi: " + verify_error,
-                        verification=detected_os,
+                    logger.info(
+                        "Waiting for final Windows access: ip=%s port=%s error=%s",
+                        vps_ip, old_port, verify_error[:180],
                     )
-                    return
+                    current = update_reinstall_job(
+                        job_id,
+                        target_online_since=int(_time.time()),
+                        verification=detected_os[:200],
+                    ) or current
+                    target_online_since = int(_time.time())
+                    continue
                 if not windows_os_matches(current.get("os_name", ""), detected_os):
                     await finish_reinstall_job(
                         application,
@@ -4393,6 +4492,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     WINDOWS_INSTALL_USER,
                     WINDOWS_INSTALL_PASSWORD,
                     "windows",
+                    preferred_port=old_port,
                 )
                 if not verified_port:
                     await finish_reinstall_job(
@@ -4420,11 +4520,13 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
             probe_success, probe_error, detected_os = await asyncio.to_thread(
                 probe_linux_os_sync,
                 vps_ip,
+                old_port,
             )
             if probe_success and linux_os_matches(current.get("os_name", ""), detected_os):
                 fix_success, fix_error, fixed_os = await asyncio.to_thread(
                     fix_linux_password_sync,
                     vps_ip,
+                    old_port,
                 )
                 detected_os = fixed_os or detected_os
                 if not fix_success:
@@ -4442,6 +4544,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     LINUX_INSTALL_USER,
                     LINUX_INSTALL_PASSWORD,
                     "linux",
+                    preferred_port=old_port,
                 )
                 if not verified_port:
                     await finish_reinstall_job(
@@ -4774,12 +4877,16 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             args = parts[1:]
 
     target_ip = None
+    preferred_port = 0
     if args:
         # ambil token pertama yang mirip IP/domain
         cand = args[0].strip()
         # bersihkan format jika user kirim ip:port
         if ":" in cand and cand.count(".") >= 3:
-            cand = cand.split(":")[0]
+            host_part, port_part = cand.rsplit(":", 1)
+            if port_part.isdigit() and 1 <= int(port_part) <= 65535:
+                preferred_port = int(port_part)
+            cand = host_part
         # validasi sederhana IP/hostname
         if re.match(r"^[0-9.]+$", cand) or re.match(r"^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$", cand) or re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", cand):
             target_ip = cand
@@ -4801,6 +4908,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         data = context.user_data
         if data.get("vps_ip"):
             target_ip = data["vps_ip"]
+            preferred_port = int(data.get("vps_port") or 0)
         else:
             await update.message.reply_text(
                 "─────────────────────────────\n"
@@ -4818,11 +4926,9 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     vps_ip = target_ip
     await update.message.reply_text(f"  📡 Ping {vps_ip}...")
 
-    ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok = await check_vps_connectivity(vps_ip)
+    status_result = await check_vps_connectivity(vps_ip, preferred_port)
     await update.message.reply_text(
-        get_connectivity_status_text(
-            vps_ip, ping_ok, ssh_22_ok, ssh_22022_ok, rdp_ok
-        )
+        get_connectivity_status_text(vps_ip, *status_result)
         + "\n\n  Tip: `/ping 104.207.93.92:22022` juga bisa (auto ambil IP)",
         parse_mode="Markdown",
     )

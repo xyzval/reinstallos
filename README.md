@@ -1,6 +1,6 @@
 # Reinstall OS - by xyzval
 
-Script dan Telegram Bot untuk reinstall VPS dua arah—**Linux ↔ Windows**—secara otomatis, dengan SSH 22/22022 (salah satu cukup untuk akses eksternal) dan RDP 3389 tetap tersedia setelah instalasi.
+Script dan Telegram Bot untuk reinstall VPS dua arah—**Linux ↔ Windows**—secara otomatis, dengan SSH 22/22022 atau port tersimpan seperti 443 untuk UpCloud trial, serta RDP 3389 tetap tersedia setelah instalasi.
 
 ---
 
@@ -109,8 +109,8 @@ Setelah itu bot langsung jalan! ✅
 
 **Windows:**
 ```
-SSH utama:    ssh -p 22022 Administrator@IP_VPS
-SSH fallback: ssh -p 22 Administrator@IP_VPS
+SSH utama:    gunakan port terverifikasi yang ditampilkan bot (22/22022/443)
+Contoh:       ssh -p 443 Administrator@IP_VPS
 RDP:          IP_VPS:3389
 User:         Administrator
 Pass:         digicore
@@ -118,8 +118,8 @@ Pass:         digicore
 
 **Linux:**
 ```
-SSH utama:    ssh -p 22022 root@IP_VPS
-SSH fallback: ssh -p 22 root@IP_VPS
+SSH utama:    gunakan port terverifikasi yang ditampilkan bot (22/22022/443)
+Contoh:       ssh -p 443 root@IP_VPS
 User:         root
 Pass:         Digicore@1
 ```
@@ -134,23 +134,23 @@ Pass:         Digicore@1
 | Owner & User | Owner menambah, menonaktifkan, dan mencabut akses user |
 | Masa Berlaku User | Pilihan 1/7/30 hari, manual 1–3650 hari, atau permanen; akses otomatis ditolak saat kedaluwarsa |
 | Reinstall OS Dua Arah | Linux → Windows/Linux dan Windows → Windows/Debian/Ubuntu dari menu yang sama |
-| Deteksi OS Otomatis | Mencoba SSH 22 lebih dahulu lalu 22022 sebagai fallback; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
-| Windows Remote Access | OpenSSH dikonfigurasi lokal di port 22 dan 22022, dengan RDP tetap aktif di 3389; provider hanya perlu meneruskan salah satu port SSH |
-| Password Final Windows | Kredensial image hanya dipakai saat bootstrap, lalu password `Administrator` dirotasi ke `digicore` dan diuji ulang melalui port 22 atau fallback 22022 |
+| Deteksi OS Otomatis | Mencoba port SSH yang tersimpan terlebih dahulu, lalu 22, 22022, dan fallback 443; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
+| Windows Remote Access | OpenSSH mempertahankan 22, 22022, dan port khusus yang tersimpan (misalnya 443), dengan RDP tetap aktif di 3389 |
+| Password Final Windows | Kredensial image hanya dipakai saat bootstrap, lalu password `Administrator` dirotasi ke `digicore` dan diuji ulang melalui salah satu endpoint SSH yang benar-benar dapat diautentikasi |
 | Ekspansi Disk Otomatis | Partisi C Windows dan filesystem root Linux otomatis diperbesar ke kapasitas maksimum yang aman sebelum instalasi dinyatakan selesai |
 | Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
 | Detail Jobs & Akses | Status/tahap/waktu/verifikasi ditampilkan rapi; akses final hanya dibuka setelah konfirmasi dan hanya untuk pemilik job terbaru |
 | SSH Command | Kirim command Bash (Linux) atau PowerShell (Windows) langsung dari Telegram |
 | VPS Info | Lihat RAM, CPU, Disk, Uptime pada Linux maupun Windows |
 | Reboot | Restart VPS Linux maupun Windows dari Telegram |
-| Status Check | Tombol Status dan `/ping` mengecek ICMP, SSH 22, SSH 22022, dan RDP 3389; VPS dianggap dapat diakses jika salah satu endpoint SSH bekerja |
+| Status Check | Tombol Status dan `/ping` mengecek ICMP, SSH 22, SSH 22022, port SSH tersimpan seperti 443, dan RDP 3389 |
 | Open All Port | Buka firewall OS dengan konfirmasi 2 tahap, backup, dan verifikasi |
 | Edit Port | Tambah port SSH, pertahankan port lama, validasi, tes koneksi, dan rollback otomatis |
 | Edit Password | Ganti password `root` di Linux atau `Administrator` di Windows melalui SSH |
-| Auto-fix Linux | Linux otomatis memasang `curl` + CA certificates, mengaktifkan root, dan mempertahankan SSH 22022 + 22 setelah install |
+| Auto-fix Linux | Linux otomatis memasang `curl` + CA certificates, mengaktifkan root, dan mempertahankan SSH 22, 22022, serta port khusus tersimpan |
 | Loading UI | Tampilan klasik SSH/download/run/install/final-check dalam satu pesan, didukung Jobs persisten |
 | Tombol Tahan Restart | Tombol menu/VPS/aksi dapat memulihkan sesi lama tanpa mewajibkan `/start` |
-| Verifikasi Hasil | Linux wajib cocok OS-nya dan login di dua port; Windows wajib cocok OS-nya, login Administrator di dua port, dan RDP 3389 aktif |
+| Verifikasi Hasil | Linux/Windows wajib cocok OS-nya dan berhasil login pada minimal satu endpoint SSH; Windows juga memverifikasi RDP aktif dari dalam guest |
 | Keamanan | Password auto-dihapus dari chat |
 
 ---
@@ -273,7 +273,7 @@ Windows 11, serta Server 2012 R2, 2016, 2019, dan 2022 sudah terverifikasi
 end-to-end sampai kembali ke Debian 12. Image tidak aktif secara otomatis;
 gunakan product key Windows yang sah bila diperlukan.
 
-**Login via SSH port 22 (utama), SSH port 22022 (fallback bila diperlukan), atau RDP port 3389.**
+**Login melalui port SSH yang terverifikasi (22, 22022, atau port tersimpan seperti 443), atau RDP 3389.**
 
 > `digicore` adalah password sederhana sesuai konfigurasi yang diminta. Jika sebuah Windows Server menolak password huruf kecil, bot melonggarkan kebijakan kompleksitas lokal sebelum mencoba kembali. Batasi akses RDP/SSH menggunakan firewall provider bila VPS berada di internet publik.
 
@@ -286,7 +286,19 @@ gunakan product key Windows yang sah bila diperlukan.
 | CentOS 9 Stream | root / Digicore@1 |
 | AlmaLinux 9 | root / Digicore@1 |
 
-**Login via SSH port 22 (utama) atau port 22022 sebagai fallback.**
+**Login melalui port SSH yang terverifikasi: 22, 22022, atau port tersimpan seperti 443.**
+
+### UpCloud trial dan SSH 443
+
+Jika jaringan trial UpCloud memblokir koneksi antar-VPS pada 22/22022, simpan VPS dengan port 443, misalnya:
+
+```text
+213.163.203.80:443@Administrator:digicore
+```
+
+Bot akan mencoba port tersimpan terlebih dahulu, menampilkan port 443 pada Status dan `/ping`, mempertahankannya setelah reinstall Windows/Linux, serta menerima verifikasi final jika minimal satu endpoint SSH berhasil diautentikasi. RDP tetap diaktifkan dan diverifikasi dari dalam Windows walaupun koneksi 3389 dari VPS bot diblokir provider.
+
+Port 443 tidak dapat digunakan bersamaan oleh OpenSSH dan web server HTTPS pada IP yang sama. Gunakan fallback ini hanya ketika diperlukan, atau tempatkan bot pada provider non-trial.
 
 ---
 
@@ -360,8 +372,8 @@ systemctl daemon-reload
 - Detail akses final memerlukan konfirmasi, hanya dapat dibuka pemilik job, dan hanya tersedia pada job terbaru VPS agar kredensial lama tidak menyesatkan
 - Job untuk VPS yang sama ditolak selama job sebelumnya masih aktif; VPS berbeda dapat berjalan bersamaan dengan batas global/per-user
 - Saat semua slot eksekusi penuh, job baru masuk antrean otomatis; antrean tetap dibatasi agar server bot terlindungi
-- Linux hanya dinyatakan selesai setelah identitas OS, ekspansi aman filesystem root, ketersediaan `curl`, dan login `root` terverifikasi melalui SSH 22 atau fallback 22022
-- Windows hanya dinyatakan selesai setelah identitas OS, password final `Administrator` terverifikasi melalui SSH 22 atau fallback 22022, RDP 3389 aktif, dan ekspansi aman partisi C terverifikasi
+- Linux hanya dinyatakan selesai setelah identitas OS, ekspansi aman filesystem root, ketersediaan `curl`, dan login `root` terverifikasi melalui port tersimpan, SSH 22, 22022, atau fallback 443
+- Windows hanya dinyatakan selesai setelah identitas OS, password final `Administrator` terverifikasi pada minimal satu endpoint SSH, RDP 3389 aktif di guest, dan ekspansi aman partisi C terverifikasi
 - OpenSSH Windows dibundel dari rilis resmi Microsoft Win32-OpenSSH yang dipin dan diverifikasi SHA-256; first boot tidak bergantung pada download OpenSSH
 - Saat reinstall dimulai dari Windows, bootstrap Cygwin diunduh oleh server bot lalu diunggah lewat SFTP; scheduled task tidak bergantung pada `certutil` yang dapat gagal pada sesi non-interaktif
 - Setelah verifikasi sukses, record VPS milik user itu saja diperbarui ke user/port/password target; Jobs tetap tidak menyimpan salinan password
