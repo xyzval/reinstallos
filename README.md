@@ -135,6 +135,7 @@ Pass:         Digicore@1
 | Masa Berlaku User | Pilihan 1/7/30 hari, manual 1–3650 hari, atau permanen; akses otomatis ditolak saat kedaluwarsa |
 | Reinstall OS Dua Arah | Linux → Windows/Linux dan Windows → Windows/Debian/Ubuntu dari menu yang sama |
 | Deteksi OS Otomatis | Mencoba port SSH yang tersimpan terlebih dahulu, lalu 22, 22022, dan fallback 443; memakai Bash pada Linux dan PowerShell/CMD pada Windows |
+| Bootstrap UpCloud Otomatis | `/bootstrapkey` membuat key Ed25519 terisolasi per user dan cloud-init siap tempel; Wizard mengubah akses key-only menjadi login password tanpa SSH manual |
 | Windows Remote Access | OpenSSH mempertahankan 22, 22022, dan port khusus yang tersimpan (misalnya 443), dengan RDP tetap aktif di 3389 |
 | Password Final Windows | Kredensial image hanya dipakai saat bootstrap, lalu password `Administrator` dirotasi ke `digicore` dan diuji ulang melalui salah satu endpoint SSH yang benar-benar dapat diautentikasi |
 | Ekspansi Disk Otomatis | Partisi C Windows dan filesystem root Linux otomatis diperbesar ke kapasitas maksimum yang aman sebelum instalasi dinyatakan selesai |
@@ -288,15 +289,34 @@ gunakan product key Windows yang sah bila diperlukan.
 
 **Login melalui port SSH yang terverifikasi: 22, 22022, atau port tersimpan seperti 443.**
 
-### UpCloud trial dan SSH 443
+### UpCloud trial: onboarding otomatis melalui SSH 443
 
-Jika jaringan trial UpCloud memblokir koneksi antar-VPS pada 22/22022, simpan VPS dengan port 443, misalnya:
+VPS UpCloud yang benar-benar baru tetap memerlukan **cloud-init saat deployment**. Ini adalah langkah bootstrap dari sisi provider agar bot dapat menjangkaunya untuk pertama kali; tidak ada bot yang dapat membuka port pada mesin yang belum bisa diakses.
+
+Alur tanpa login SSH manual:
+
+1. User yang sudah diotorisasi mengirim `/bootstrapkey` ke bot.
+2. Bot membuat satu key Ed25519 khusus untuk Telegram user tersebut dan mengirim cloud-init siap tempel. Salin seluruh blok mulai `#cloud-config` ke bagian **Initialization script / User data** saat membuat VPS UpCloud.
+3. Tunggu VPS dan cloud-init selesai boot.
+4. Buka `/start` → **Tambah VPS Baru** → **Wizard Cepat**.
+5. Isi IP VPS, pilih port **443 (UpCloud)**, pilih user **root**, lalu tekan **Gunakan Bootstrap Key**.
+6. Bot login dengan private key, menetapkan password Linux `Digicore@1`, mengaktifkan password SSH, mempertahankan key sebagai fallback, memverifikasi login password, lalu menyimpan VPS.
+
+Alternatif format langsung untuk satu VPS:
+
+```text
+IP_VPS:443@root:KEY
+```
+
+Private key tidak pernah dikirim ke Telegram. Key disimpan di server bot dengan permission owner-only dan dipisahkan per Telegram user. Bulk import sengaja tidak menerima marker `KEY`, sehingga setiap bootstrap harus diverifikasi satu per satu.
+
+Setelah onboarding, bot mencoba port tersimpan terlebih dahulu lalu 22/22022, mempertahankan port 443 setelah reinstall Windows/Linux, dan menerima verifikasi final hanya dari endpoint SSH yang benar-benar dapat diautentikasi. RDP tetap diaktifkan dan diverifikasi dari dalam Windows walaupun koneksi 3389 dari VPS bot diblokir provider.
+
+Untuk VPS Windows yang sudah selesai direinstall, format akses tetap seperti berikut:
 
 ```text
 213.163.203.80:443@Administrator:digicore
 ```
-
-Bot akan mencoba port tersimpan terlebih dahulu, menampilkan port 443 pada Status dan `/ping`, mempertahankannya setelah reinstall Windows/Linux, serta menerima verifikasi final jika minimal satu endpoint SSH berhasil diautentikasi. RDP tetap diaktifkan dan diverifikasi dari dalam Windows walaupun koneksi 3389 dari VPS bot diblokir provider.
 
 Port 443 tidak dapat digunakan bersamaan oleh OpenSSH dan web server HTTPS pada IP yang sama. Gunakan fallback ini hanya ketika diperlukan, atau tempatkan bot pada provider non-trial.
 

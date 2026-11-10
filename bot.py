@@ -25,6 +25,8 @@ import shlex
 import urllib.request
 import uuid
 import paramiko
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand, BotCommandScopeChat
 from telegram.ext import (
     Application,
@@ -65,6 +67,8 @@ VPS_FILE = os.path.join(BASE_DIR, "vps_data.json")
 AUTH_USERS_FILE = os.path.join(BASE_DIR, "authorized_users.json")
 JOBS_FILE = os.path.join(BASE_DIR, "reinstall_jobs.json")
 RESTART_NOTIFY_FILE = os.path.join(BASE_DIR, ".restart_notify")
+SSH_KEYS_DIR = os.path.join(BASE_DIR, "ssh_keys")
+_SSH_KEY_LOCK = threading.Lock()
 SERVICE_NAME = os.getenv("SERVICE_NAME", "reinstall-bot")
 MAX_ACTIVE_REINSTALL_JOBS = max(1, int(os.getenv("MAX_ACTIVE_REINSTALL_JOBS", "4")))
 MAX_ACTIVE_REINSTALL_JOBS_PER_USER = max(1, int(os.getenv("MAX_ACTIVE_REINSTALL_JOBS_PER_USER", "3")))
@@ -377,10 +381,17 @@ def parse_vps_detail(text: str) -> dict:
         if ":" in login:
             user, password = login.split(":", 1)
             result["vps_user"] = user
-            result["vps_pass"] = password
+            if password.strip().upper() in {"KEY", "SSHKEY"}:
+                result["vps_pass"] = ""
+                result["auth_type"] = "bootstrap_key"
+            else:
+                result["vps_pass"] = password
+                result["auth_type"] = "password"
         else:
             return None
-        if not result["vps_ip"] or not result["vps_pass"]:
+        if not result["vps_ip"] or (
+            not result["vps_pass"] and result.get("auth_type") != "bootstrap_key"
+        ):
             return None
         return result
     except (ValueError, IndexError):
@@ -446,10 +457,18 @@ def get_wizard_port_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("22 (default)", callback_data="wiz_port_22"),
          InlineKeyboardButton("22022", callback_data="wiz_port_22022")],
-        [InlineKeyboardButton("2222", callback_data="wiz_port_2222"),
-         InlineKeyboardButton("✏️ Custom", callback_data="wiz_port_custom")],
+        [InlineKeyboardButton("443 (UpCloud)", callback_data="wiz_port_443"),
+         InlineKeyboardButton("2222", callback_data="wiz_port_2222")],
+        [InlineKeyboardButton("✏️ Custom", callback_data="wiz_port_custom")],
         [InlineKeyboardButton("❌ Batal", callback_data="wiz_cancel")],
     ])
+
+def get_wizard_auth_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔑 Gunakan Bootstrap Key", callback_data="wiz_auth_key")],
+        [InlineKeyboardButton("❌ Batal", callback_data="wiz_cancel")],
+    ])
+
 
 def get_wizard_user_keyboard():
     return InlineKeyboardMarkup([
@@ -1576,6 +1595,261 @@ async def owner_custom_expiry_handler(update: Update, context: ContextTypes.DEFA
     return SELECT_VPS_ACTION
 
 
+
+# ============ Per-user SSH Bootstrap Keys ============
+
+def _bootstrap_key_paths(user_id: int) -> tuple:
+    user_dir = os.path.join(SSH_KEYS_DIR, str(int(user_id)))
+    return (
+        os.path.join(user_dir, "upcloud_bootstrap_ed25519"),
+        os.path.join(user_dir, "upcloud_bootstrap_ed25519.pub"),
+    )
+
+
+def ensure_user_bootstrap_key(user_id: int) -> tuple:
+    """Create one isolated Ed25519 bootstrap keypair for this authorized user."""
+    private_path, public_path = _bootstrap_key_paths(user_id)
+    with _SSH_KEY_LOCK:
+        os.makedirs(SSH_KEYS_DIR, mode=0o700, exist_ok=True)
+        os.chmod(SSH_KEYS_DIR, 0o700)
+        os.makedirs(os.path.dirname(private_path), mode=0o700, exist_ok=True)
+        os.chmod(os.path.dirname(private_path), 0o700)
+        if not (os.path.isfile(private_path) and os.path.isfile(public_path)):
+            key = Ed25519PrivateKey.generate()
+            private_bytes = key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.OpenSSH,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            public_bytes = key.public_key().public_bytes(
+                encoding=serialization.Encoding.OpenSSH,
+                format=serialization.PublicFormat.OpenSSH,
+            )
+            private_tmp = private_path + ".tmp"
+            public_tmp = public_path + ".tmp"
+            with open(private_tmp, "wb") as handle:
+                handle.write(private_bytes + b"\n")
+            os.chmod(private_tmp, 0o600)
+            with open(public_tmp, "wb") as handle:
+                handle.write(public_bytes + f" reinstallos-user-{int(user_id)}\n".encode())
+            os.chmod(public_tmp, 0o644)
+            os.replace(private_tmp, private_path)
+            os.replace(public_tmp, public_path)
+        os.chmod(private_path, 0o600)
+        os.chmod(public_path, 0o644)
+        with open(public_path, "r", encoding="utf-8") as handle:
+            public_key = handle.read().strip()
+    if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+ reinstallos-user-[0-9]+", public_key):
+        raise RuntimeError("Public key bootstrap tidak valid")
+    return private_path, public_key
+
+
+def _safe_saved_key_path(data: dict) -> str:
+    path = str(data.get("ssh_key_path") or "")
+    if not path:
+        return ""
+    try:
+        real_path = os.path.realpath(path)
+        keys_root = os.path.realpath(SSH_KEYS_DIR)
+        if os.path.commonpath([real_path, keys_root]) != keys_root:
+            return ""
+        if not os.path.isfile(real_path):
+            return ""
+        return real_path
+    except (OSError, ValueError):
+        return ""
+
+
+def _load_private_key(key_path: str):
+    errors = []
+    for key_class in (paramiko.Ed25519Key, paramiko.RSAKey, paramiko.ECDSAKey):
+        try:
+            return key_class.from_private_key_file(key_path)
+        except Exception as exc:
+            errors.append(str(exc)[:80])
+    raise RuntimeError("Private key bootstrap tidak dapat dibaca")
+
+
+def _connect_with_key(vps_ip: str, port: int, username: str, key_path: str, timeout: int = 12):
+    ssh = paramiko.SSHClient()
+    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        ssh.connect(
+            vps_ip,
+            port=int(port),
+            username=username,
+            pkey=_load_private_key(key_path),
+            timeout=timeout,
+            banner_timeout=timeout,
+            auth_timeout=timeout,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        return ssh
+    except Exception:
+        ssh.close()
+        raise
+
+
+def build_bootstrap_cloud_init(public_key: str) -> str:
+    """Cloud-init that exposes key-only SSH 443 without embedding a password."""
+    if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+ reinstallos-user-[0-9]+", public_key):
+        raise ValueError("Public key bootstrap tidak valid")
+    return f"""#cloud-config
+disable_root: false
+ssh_pwauth: false
+
+users:
+  - default
+  - name: root
+    lock_passwd: true
+    ssh_authorized_keys:
+      - {public_key}
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/00-reinstallos-bootstrap.conf
+    owner: root:root
+    permissions: "0600"
+    content: |
+      Port 22
+      Port 443
+      PermitRootLogin prohibit-password
+      PubkeyAuthentication yes
+      PasswordAuthentication no
+
+runcmd:
+  - systemctl disable --now ssh.socket || true
+  - sshd -t
+  - systemctl enable ssh.service || systemctl enable sshd.service
+  - systemctl restart ssh.service || systemctl restart sshd.service
+"""
+
+
+def bootstrap_password_from_key_sync(data: dict) -> tuple:
+    """Use the per-user key once, enable password login, and retain all access."""
+    key_path = _safe_saved_key_path(data)
+    if not key_path:
+        return False, "Bootstrap key tidak ditemukan", None
+    try:
+        preferred_port = int(data.get("vps_port") or UPCLOUD_TRIAL_SSH_PORT)
+    except (TypeError, ValueError):
+        preferred_port = UPCLOUD_TRIAL_SSH_PORT
+    if not 1 <= preferred_port <= 65535:
+        return False, "Port SSH bootstrap tidak valid", None
+    username = str(data.get("vps_user") or LINUX_INSTALL_USER).strip()
+    if username != LINUX_INSTALL_USER:
+        return False, "Cloud-init bootstrap menggunakan user root; pilih user root di Wizard", None
+    ssh = None
+    try:
+        ssh = _connect_with_key(
+            data["vps_ip"], preferred_port, username, key_path, timeout=18
+        )
+        if detect_remote_os_sync(ssh) != "linux":
+            raise RuntimeError("Bootstrap key hanya digunakan untuk VPS Linux baru")
+        custom_line = ""
+        if preferred_port not in (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT):
+            custom_line = f"Port {preferred_port}\n"
+        account = shlex.quote(f"{username}:{LINUX_INSTALL_PASSWORD}")
+        script = f"""set -eu
+if [ "$(id -u)" -eq 0 ]; then SUDO=""; else SUDO="sudo"; fi
+printf '%s\\n' {account} | $SUDO chpasswd
+$SUDO passwd -u root >/dev/null 2>&1 || true
+$SUDO mkdir -p /etc/ssh/sshd_config.d
+if ! $SUDO grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config.d/\\*\\.conf' /etc/ssh/sshd_config; then
+    printf '%s\\n' 'Include /etc/ssh/sshd_config.d/*.conf' | $SUDO tee /tmp/reinstallos-sshd-include >/dev/null
+    $SUDO sh -c 'cat /tmp/reinstallos-sshd-include /etc/ssh/sshd_config > /etc/ssh/sshd_config.reinstallos'
+    $SUDO mv /etc/ssh/sshd_config.reinstallos /etc/ssh/sshd_config
+fi
+$SUDO rm -f /etc/ssh/sshd_config.d/00-reinstallos-bootstrap.conf
+$SUDO tee /etc/ssh/sshd_config.d/00-reinstallos-access.conf >/dev/null <<'EOF'
+Port 22
+Port 22022
+{custom_line}PermitRootLogin yes
+PubkeyAuthentication yes
+PasswordAuthentication yes
+EOF
+$SUDO sshd -t
+if command -v ufw >/dev/null 2>&1 && $SUDO ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    $SUDO ufw allow 22/tcp >/dev/null
+    $SUDO ufw allow 22022/tcp >/dev/null
+    $SUDO ufw allow {preferred_port}/tcp >/dev/null
+fi
+if command -v firewall-cmd >/dev/null 2>&1 && $SUDO systemctl is-active --quiet firewalld; then
+    $SUDO firewall-cmd --permanent --add-port=22/tcp >/dev/null
+    $SUDO firewall-cmd --permanent --add-port=22022/tcp >/dev/null
+    $SUDO firewall-cmd --permanent --add-port={preferred_port}/tcp >/dev/null
+    $SUDO firewall-cmd --reload >/dev/null
+fi
+if $SUDO systemctl is-active --quiet ssh.socket 2>/dev/null || $SUDO systemctl is-enabled --quiet ssh.socket 2>/dev/null; then
+    $SUDO systemctl disable --now ssh.socket >/dev/null 2>&1 || true
+fi
+$SUDO systemctl enable ssh.service >/dev/null 2>&1 || $SUDO systemctl enable sshd.service >/dev/null 2>&1 || true
+$SUDO systemctl restart ssh.service >/dev/null 2>&1 || $SUDO systemctl restart sshd.service >/dev/null 2>&1 || $SUDO service ssh restart >/dev/null
+printf 'REINSTALLOS_PASSWORD_READY\\n'
+"""
+        _, stdout, stderr = ssh.exec_command(script, timeout=90)
+        rc, output, error = _read_ssh_streams(stdout, stderr)
+        if rc != 0 or "REINSTALLOS_PASSWORD_READY" not in output:
+            raise RuntimeError(error[:250] or output[:250] or "Aktivasi password gagal")
+    except Exception as exc:
+        return False, str(exc)[:300], None
+    finally:
+        if ssh:
+            try:
+                ssh.close()
+            except Exception:
+                pass
+
+    verify = None
+    try:
+        verify = _connect_with_credentials(
+            data["vps_ip"], preferred_port, username, LINUX_INSTALL_PASSWORD, timeout=15
+        )
+        if detect_remote_os_sync(verify) != "linux":
+            raise RuntimeError("Endpoint password bukan Linux")
+    except Exception as exc:
+        return False, f"Password baru gagal diverifikasi: {str(exc)[:220]}", None
+    finally:
+        if verify:
+            try:
+                verify.close()
+            except Exception:
+                pass
+
+    prepared = dict(data)
+    prepared.update({
+        "vps_user": username,
+        "vps_pass": LINUX_INSTALL_PASSWORD,
+        "auth_type": "password",
+        "key_fallback": True,
+        "ssh_key_path": key_path,
+    })
+    return True, "", prepared
+
+
+async def cmd_bootstrap_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show this user's public key and ready-to-paste UpCloud cloud-init."""
+    if not is_authorized(update.effective_user.id):
+        return
+    try:
+        _, public_key = await asyncio.to_thread(
+            ensure_user_bootstrap_key, update.effective_user.id
+        )
+        cloud_init = build_bootstrap_cloud_init(public_key)
+        await update.message.reply_text(
+            "─────────────────────────────\n"
+            "  🔑  UpCloud Bootstrap Key\n"
+            "─────────────────────────────\n\n"
+            "Tempel cloud-init berikut saat membuat VPS UpCloud. "
+            "Private key tetap tersimpan di bot dan tidak pernah dikirim.\n\n"
+            f"```\n{cloud_init}```\n"
+            "Setelah VPS hidup, tambahkan melalui Wizard: port 443, user root, "
+            "lalu pilih Gunakan Bootstrap Key.",
+            parse_mode="Markdown",
+        )
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Gagal membuat bootstrap key: {str(exc)[:200]}")
+
 # ============ Handlers ============
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1638,6 +1912,9 @@ async def add_vps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         vps_list = load_vps_list(update.effective_user.id)
         for line in lines:
             d = parse_vps_detail(line)
+            if d and d.get("auth_type") == "bootstrap_key":
+                failed.append(line)
+                continue
             if d:
                 exists = any(v['vps_ip']==d['vps_ip'] and v['vps_port']==d['vps_port'] for v in vps_list)
                 if not exists:
@@ -1665,13 +1942,35 @@ async def add_vps_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"❌ Gagal bulk. {len(failed)} baris error. Cek format `ip:port@user:pass` per baris.")
         return ADD_VPS
 
-    # Save to VPS list
     user_id = update.effective_user.id
+    if data.get("auth_type") == "bootstrap_key":
+        private_path, _ = await asyncio.to_thread(ensure_user_bootstrap_key, user_id)
+        data["ssh_key_path"] = private_path
+        await update.message.reply_text(
+            f"⏳ Mengaktifkan password melalui bootstrap key di {data['vps_ip']}:{data['vps_port']}..."
+        )
+        ok, error, prepared = await asyncio.to_thread(
+            bootstrap_password_from_key_sync, data
+        )
+        if not ok:
+            await update.message.reply_text(
+                "❌ Bootstrap key gagal; VPS tidak disimpan.\n\n" + error[:300]
+            )
+            return ADD_VPS
+        data = prepared
+
+    # Save to VPS list
     vps_list = load_vps_list(user_id)
-    # Check if already exists
-    exists = any(v['vps_ip'] == data['vps_ip'] and v['vps_port'] == data['vps_port'] for v in vps_list)
-    if not exists:
+    # Add a new endpoint; a successful bootstrap also refreshes an existing record.
+    existing_index = next((
+        index for index, item in enumerate(vps_list)
+        if item['vps_ip'] == data['vps_ip'] and int(item['vps_port']) == int(data['vps_port'])
+    ), None)
+    if existing_index is None:
         vps_list.append(data)
+        save_vps_list(user_id, vps_list)
+    elif data.get("key_fallback"):
+        vps_list[existing_index] = data
         save_vps_list(user_id, vps_list)
 
     # Set as active VPS
@@ -1777,8 +2076,9 @@ async def wiz_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "  🚀 Step 4/4 - Password\n"
         "─────────────────────────────\n\n"
         f"  🎯 {wiz['vps_ip']}:{wiz['vps_port']}@{wiz['vps_user']}:****\n\n"
-        "Kirim password VPS:",
+        "Kirim password VPS, atau gunakan bootstrap key:",
         parse_mode="Markdown",
+        reply_markup=get_wizard_auth_keyboard(),
     )
     return WIZ_PASS
 
@@ -1795,13 +2095,74 @@ async def wiz_user_text_handler(update: Update, context: ContextTypes.DEFAULT_TY
         "  🚀 Step 4/4 - Password\n"
         "─────────────────────────────\n\n"
         f"  🎯 {wiz['vps_ip']}:{wiz['vps_port']}@{wiz['vps_user']}:****\n\n"
-        "Kirim password VPS:",
+        "Kirim password VPS, atau gunakan bootstrap key:",
         parse_mode="Markdown",
+        reply_markup=get_wizard_auth_keyboard(),
     )
     return WIZ_PASS
 
+async def wiz_key_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    if query.data == "wiz_cancel":
+        await query.edit_message_text(
+            "❌ Dibatalkan.", reply_markup=get_vps_list_keyboard(update.effective_user.id)
+        )
+        return SELECT_VPS_ACTION
+    wiz = context.user_data.get("wiz", {})
+    private_path, _ = await asyncio.to_thread(
+        ensure_user_bootstrap_key, update.effective_user.id
+    )
+    data = {
+        "vps_ip": wiz.get("vps_ip"),
+        "vps_port": wiz.get("vps_port", UPCLOUD_TRIAL_SSH_PORT),
+        "vps_user": wiz.get("vps_user", "root"),
+        "vps_pass": "",
+        "auth_type": "bootstrap_key",
+        "ssh_key_path": private_path,
+    }
+    await query.edit_message_text(
+        f"⏳ Login key dan mengaktifkan password di {data['vps_ip']}:{data['vps_port']}..."
+    )
+    ok, error, prepared = await asyncio.to_thread(
+        bootstrap_password_from_key_sync, data
+    )
+    if not ok:
+        await query.edit_message_text(
+            "❌ Bootstrap key gagal; VPS tidak disimpan.\n\n" + error[:300],
+            reply_markup=get_vps_list_keyboard(update.effective_user.id),
+        )
+        return SELECT_VPS_ACTION
+    vps_list = load_vps_list(update.effective_user.id)
+    existing_index = next((
+        index for index, item in enumerate(vps_list)
+        if item["vps_ip"] == prepared["vps_ip"]
+        and int(item["vps_port"]) == int(prepared["vps_port"])
+    ), None)
+    if existing_index is None:
+        vps_list.append(prepared)
+    else:
+        vps_list[existing_index] = prepared
+    save_vps_list(update.effective_user.id, vps_list)
+    context.user_data.update(prepared)
+    context.user_data.pop("wiz", None)
+    await query.edit_message_text(
+        get_vps_info_text(prepared)
+        + "\n\n  ✅ SSH key berhasil diubah menjadi login password."
+        + "\n  ✅ SSH key tetap disimpan sebagai cadangan."
+        + "\n\n  Pilih aksi:",
+        reply_markup=get_action_keyboard(),
+    )
+    return SELECT_VPS_ACTION
+
+
 async def wiz_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     pwd = update.message.text.strip()
+    if pwd.upper() in {"KEY", "SSHKEY"}:
+        await update.message.reply_text(
+            "Gunakan tombol 🔑 Gunakan Bootstrap Key pada langkah password."
+        )
+        return WIZ_PASS
     try:
         await update.message.delete()
     except:
@@ -3378,33 +3739,39 @@ def _ssh_passwords(data: dict) -> list:
 
 
 def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
-    """Connect on port 22 first, then 22022, and detect Linux or Windows."""
+    """Connect using the saved endpoint first, with isolated key fallback."""
     errors = []
+    key_path = _safe_saved_key_path(data)
+    saved_user = str(data.get("vps_user") or "").strip().lower()
+    key_first = data.get("auth_type") == "bootstrap_key" or not data.get("vps_pass")
     for port in _ssh_ports(data):
         for username in _ssh_users(data):
-            for password in _ssh_passwords(data):
-                ssh = paramiko.SSHClient()
-                ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            methods = []
+            if key_path and username.lower() == saved_user and key_first:
+                methods.append(("key", ""))
+            methods.extend(("password", password) for password in _ssh_passwords(data))
+            if key_path and username.lower() == saved_user and not key_first:
+                methods.append(("key", ""))
+            for method, password in methods:
+                ssh = None
                 try:
-                    ssh.connect(
-                        data["vps_ip"],
-                        port=port,
-                        username=username,
-                        password=password,
-                        timeout=timeout,
-                        banner_timeout=timeout,
-                        auth_timeout=timeout,
-                        allow_agent=False,
-                        look_for_keys=False,
-                    )
+                    if method == "key":
+                        ssh = _connect_with_key(
+                            data["vps_ip"], port, username, key_path, timeout=timeout
+                        )
+                    else:
+                        ssh = _connect_with_credentials(
+                            data["vps_ip"], port, username, password, timeout=timeout
+                        )
                     remote_os = detect_remote_os_sync(ssh)
                     return ssh, remote_os, port, username
                 except Exception as exc:
-                    errors.append(f"{username}@{port}: {str(exc)[:100]}")
-                    try:
-                        ssh.close()
-                    except Exception:
-                        pass
+                    errors.append(f"{username}@{port}/{method}: {str(exc)[:90]}")
+                    if ssh:
+                        try:
+                            ssh.close()
+                        except Exception:
+                            pass
     raise RuntimeError("; ".join(errors[-4:]) or "Tidak ada endpoint SSH yang dapat diakses")
 
 
@@ -4802,11 +5169,33 @@ async def auto_add_vps(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     except Exception:
         pass
 
+    if data.get("auth_type") == "bootstrap_key":
+        private_path, _ = await asyncio.to_thread(ensure_user_bootstrap_key, user_id)
+        data["ssh_key_path"] = private_path
+        await update.message.reply_text(
+            f"⏳ Mengaktifkan password melalui bootstrap key di {data['vps_ip']}:{data['vps_port']}..."
+        )
+        ok, error, prepared = await asyncio.to_thread(
+            bootstrap_password_from_key_sync, data
+        )
+        if not ok:
+            await update.message.reply_text(
+                "❌ Bootstrap key gagal; VPS tidak disimpan.\n\n" + error[:300]
+            )
+            return
+        data = prepared
+
     # Save to VPS list
     vps_list = load_vps_list(user_id)
-    exists = any(v['vps_ip'] == data['vps_ip'] and v['vps_port'] == data['vps_port'] for v in vps_list)
-    if not exists:
+    existing_index = next((
+        index for index, item in enumerate(vps_list)
+        if item['vps_ip'] == data['vps_ip'] and int(item['vps_port']) == int(data['vps_port'])
+    ), None)
+    if existing_index is None:
         vps_list.append(data)
+        save_vps_list(user_id, vps_list)
+    elif data.get("key_fallback"):
+        vps_list[existing_index] = data
         save_vps_list(user_id, vps_list)
 
     # Set as active VPS
@@ -5156,6 +5545,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Perintah:\n"
         "  /start    - Menu VPS\n"
         "  /jobs     - Progress reinstall jobs\n"
+        "  /bootstrapkey - Cloud-init + SSH key UpCloud\n"
         "  /info     - Info VPS\n"
         "  /ssh CMD  - SSH command\n"
         "  /reboot   - Reboot VPS\n"
@@ -5199,6 +5589,7 @@ async def post_init(application):
     user_commands = [
         BotCommand("start", "Menu VPS saya"),
         BotCommand("jobs", "Progress reinstall jobs"),
+        BotCommand("bootstrapkey", "Cloud-init dan SSH key UpCloud"),
         BotCommand("info", "Info VPS aktif"),
         BotCommand("ssh", "SSH command"),
         BotCommand("reboot", "Reboot VPS"),
@@ -5298,7 +5689,10 @@ def main() -> None:
                 CallbackQueryHandler(wiz_user_callback, pattern="^wiz_cancel"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, wiz_user_text_handler),
             ],
-            WIZ_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, wiz_pass_handler)],
+            WIZ_PASS: [
+                CallbackQueryHandler(wiz_key_callback, pattern="^wiz_(auth_key|cancel)$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, wiz_pass_handler),
+            ],
             SELECT_OS: [
                 CallbackQueryHandler(select_os, pattern="^os_"),
                 CallbackQueryHandler(select_os_category, pattern="^cat_"),
@@ -5341,6 +5735,7 @@ def main() -> None:
     app.add_handler(TypeHandler(Update, access_guard), group=-1)
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("jobs", jobs_command))
+    app.add_handler(CommandHandler("bootstrapkey", cmd_bootstrap_key))
     app.add_handler(CallbackQueryHandler(handle_jobs_callback, pattern="^jobs_"))
     # Final callback fallback: old/expired buttons get an explanation, never silence.
     app.add_handler(CallbackQueryHandler(handle_stale_callback))
