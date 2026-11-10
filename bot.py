@@ -15,6 +15,7 @@ import json
 import logging
 import asyncio
 import base64
+import gzip
 import hashlib
 import re
 import socket
@@ -121,6 +122,10 @@ WINDOWS_OPENSSH_URL = (
     "v9.5.0.0p1-Beta/OpenSSH-Win64.zip"
 )
 WINDOWS_OPENSSH_SHA256 = "bd48fe985d400402c278c485db20e6a82bc4c7f7d8e0ef5a81128f523096530c"
+CHROME_ENTERPRISE_MSI_URL = (
+    "https://dl.google.com/dl/chrome/install/"
+    "googlechromestandaloneenterprise64.msi"
+)
 WINDOWS_10_DD_IMAGES = {
     "en": "https://dl.lamp.sh/vhd/en-us_windows10_ltsc.xz",
     "en-us": "https://dl.lamp.sh/vhd/en-us_windows10_ltsc.xz",
@@ -895,6 +900,8 @@ def get_job_detail_text(job: dict) -> str:
                 "  RDP 3389           : READY",
                 "  Disk C             : MAXIMUM",
             ])
+            if _windows_requires_chrome(job.get("os_name", "")):
+                lines.append("  Google Chrome      : READY")
         lines.append("  Final Check         : VERIFIED")
         if job_access_available(job):
             lines.extend(["", "  🔐 Detail akses tersedia melalui tombol di bawah."])
@@ -3678,6 +3685,29 @@ def _powershell_encoded(script: str) -> str:
     )
 
 
+def _powershell_encoded_gzip(script: str) -> str:
+    """Keep large generated scripts below the Windows command-line limit."""
+    payload = base64.b64encode(
+        gzip.compress(script.encode("utf-8"), compresslevel=9, mtime=0)
+    ).decode("ascii")
+    wrapper = r'''
+$inputStream = New-Object IO.MemoryStream(,[Convert]::FromBase64String('__PAYLOAD__'))
+$gzipStream = New-Object IO.Compression.GzipStream(
+    $inputStream, [IO.Compression.CompressionMode]::Decompress
+)
+$reader = New-Object IO.StreamReader($gzipStream, [Text.Encoding]::UTF8)
+try {
+    $scriptBlock = [ScriptBlock]::Create($reader.ReadToEnd())
+    & $scriptBlock
+} finally {
+    $reader.Dispose()
+    $gzipStream.Dispose()
+    $inputStream.Dispose()
+}
+'''.replace("__PAYLOAD__", payload)
+    return _powershell_encoded(wrapper)
+
+
 def _read_ssh_streams(stdout, stderr) -> tuple:
     output = stdout.read().decode("utf-8", errors="replace").strip()
     error = stderr.read().decode("utf-8", errors="replace").strip()
@@ -4489,6 +4519,131 @@ def windows_os_matches(requested_os: str, detected_os: str) -> bool:
     return True
 
 
+def _windows_requires_chrome(os_name: str) -> bool:
+    """Install Chrome only for the newest Windows 11 LTSC option."""
+    return str(os_name or "") == WINDOWS_OPTIONS["win11ltsc"]["name"]
+
+
+def _windows_chrome_powershell_blocks(install_chrome: bool) -> tuple:
+    """Start the official Chrome MSI download early, then install and verify it."""
+    if not install_chrome:
+        return (
+            "$chromeRequested = 0\n$chromeReady = 1\n",
+            'Write-Output "CHROME_REQUESTED:0"\nWrite-Output "CHROME_READY:1"\n',
+        )
+    start = r'''
+$chromeRequested = 1
+$chromeReady = [int]($chromeRequested -eq 0)
+$chromeVersion = ''
+$chromeError = ''
+$chromeClient = $null
+$chromeDownloadTask = $null
+$chromeRoot = Join-Path $env:ProgramData 'ReinstallOS'
+$chromeInstaller = Join-Path $chromeRoot 'google-chrome-enterprise-x64.msi'
+$chromeCandidates = @()
+if ($env:ProgramFiles) {
+    $chromeCandidates += Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
+}
+if (${env:ProgramFiles(x86)}) {
+    $chromeCandidates += Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'
+}
+if ($chromeRequested -eq 1) {
+    $chromeExe = $chromeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if ($chromeExe) {
+        $chromeReady = 1
+        $chromeVersion = (Get-Item -LiteralPath $chromeExe).VersionInfo.ProductVersion
+    } else {
+        try {
+            New-Item -ItemType Directory -Path $chromeRoot -Force -ErrorAction Stop | Out-Null
+            Remove-Item -LiteralPath $chromeInstaller -Force -ErrorAction SilentlyContinue
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $chromeClient = New-Object System.Net.WebClient
+            $chromeClient.Headers['User-Agent'] = 'ReinstallOS Chrome Provisioner'
+            $chromeDownloadTask = $chromeClient.DownloadFileTaskAsync(
+                [Uri]'__REINSTALLOS_CHROME_MSI_URL__', $chromeInstaller
+            )
+        } catch {
+            $chromeError = ($_.Exception.Message -replace '[\r\n]+', ' ')
+        }
+    }
+}
+'''.replace(
+        "__REINSTALLOS_CHROME_REQUESTED__",
+        "1" if install_chrome else "0",
+    ).replace(
+        "__REINSTALLOS_CHROME_MSI_URL__",
+        CHROME_ENTERPRISE_MSI_URL.replace("'", "''"),
+    )
+    finish = r'''
+if ($chromeRequested -eq 1 -and $chromeReady -ne 1) {
+    try {
+        if (-not $chromeDownloadTask) {
+            if ($chromeError) { throw $chromeError }
+            throw 'Download Chrome tidak dapat dimulai'
+        }
+        $downloadDeadline = [DateTime]::UtcNow.AddMinutes(5)
+        while (-not $chromeDownloadTask.IsCompleted) {
+            if ([DateTime]::UtcNow -ge $downloadDeadline) {
+                $chromeClient.CancelAsync()
+                throw 'Download Chrome melewati batas 5 menit'
+            }
+            Start-Sleep -Seconds 5
+            Write-Output 'CHROME_DOWNLOAD_PENDING:1'
+        }
+        $chromeDownloadTask.GetAwaiter().GetResult()
+        if (-not (Test-Path -LiteralPath $chromeInstaller)) { throw 'MSI Chrome tidak ditemukan' }
+        $signature = Get-AuthenticodeSignature -FilePath $chromeInstaller
+        $signer = [string]$signature.SignerCertificate.Subject
+        if ($signature.Status -ne 'Valid' -or $signer -notmatch '(?i)(^|,\s*)CN=Google LLC(,|$)') {
+            throw 'Tanda tangan MSI Chrome bukan Google LLC atau tidak valid'
+        }
+        $arguments = "/i `"$chromeInstaller`" /qn /norestart"
+        $process = Start-Process -FilePath "$env:SystemRoot\System32\msiexec.exe" `
+            -ArgumentList $arguments -PassThru -ErrorAction Stop
+        if (-not $process.WaitForExit(180000)) {
+            $process.Kill()
+            throw 'Instalasi Chrome melewati batas 3 menit'
+        }
+        if ($process.ExitCode -notin @(0, 1641, 3010)) {
+            throw "msiexec exit $($process.ExitCode)"
+        }
+        $chromeReady = 1
+    } catch {
+        $chromeError = ($_.Exception.Message -replace '[\r\n]+', ' ')
+    } finally {
+        if ($chromeClient) { $chromeClient.Dispose() }
+        Remove-Item -LiteralPath $chromeInstaller -Force -ErrorAction SilentlyContinue
+    }
+}
+if ($chromeRequested -eq 1 -and $chromeReady -eq 1) {
+    try {
+        $chromeExe = $chromeCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+        if (-not $chromeExe) { throw 'chrome.exe tidak ditemukan setelah instalasi' }
+        $chromeVersion = (Get-Item -LiteralPath $chromeExe).VersionInfo.ProductVersion
+        if (-not $chromeVersion) { throw 'versi chrome.exe tidak dapat dibaca' }
+        $commonDesktop = [Environment]::GetFolderPath('CommonDesktopDirectory')
+        if (-not $commonDesktop) { throw 'Public Desktop tidak ditemukan' }
+        $shortcutPath = Join-Path $commonDesktop 'Google Chrome.lnk'
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $chromeExe
+        $shortcut.WorkingDirectory = Split-Path -Parent $chromeExe
+        $shortcut.IconLocation = "$chromeExe,0"
+        $shortcut.Save()
+        if (-not (Test-Path -LiteralPath $shortcutPath)) { throw 'shortcut Google Chrome gagal dibuat' }
+    } catch {
+        $chromeReady = 0
+        $chromeError = ($_.Exception.Message -replace '[\r\n]+', ' ')
+    }
+}
+Write-Output "CHROME_REQUESTED:$chromeRequested"
+Write-Output "CHROME_READY:$chromeReady"
+if ($chromeVersion) { Write-Output "CHROME_VERSION:$chromeVersion" }
+if ($chromeError) { Write-Output "CHROME_ERROR:$chromeError" }
+'''
+    return start, finish
+
+
 def _windows_branding_powershell() -> str:
     """Return an idempotent, narrowly scoped OEM/wallpaper cleanup script."""
     return r'''
@@ -4580,11 +4735,18 @@ if ($brandingError) { Write-Output "BRANDING_ERROR:$brandingError" }
     )
 
 
-def verify_windows_install_sync(vps_ip: str, preferred_port: int = 0) -> tuple:
-    """Finalize Windows, retaining a custom SSH port such as UpCloud 443."""
+def verify_windows_install_sync(
+    vps_ip: str,
+    preferred_port: int = 0,
+    install_chrome: bool = False,
+) -> tuple:
+    """Finalize Windows, retaining custom SSH and requested Chrome setup."""
     detected_os = ""
     bootstrap_ssh = None
     bootstrap_errors = []
+    chrome_start_script, chrome_finish_script = _windows_chrome_powershell_blocks(
+        install_chrome
+    )
 
     # A fresh raw DD image may still use its vendor credential. Recovered jobs
     # may already have rotated it, so try the requested final credential first.
@@ -4621,6 +4783,9 @@ if (-not $caption) { $caption = (Get-WmiObject Win32_OperatingSystem).Caption }
 $ports = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort
 $rdp = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server').fDenyTSConnections
 $servicesReady = [int](22 -in $ports -and 22022 -in $ports -and $rdp -eq 0)
+
+__REINSTALLOS_CHROME_START_BLOCK__
+
 $diskReady = 0
 $diskState = 'UNKNOWN'
 $diskError = ''
@@ -4700,6 +4865,8 @@ if ($servicesReady -eq 1 -and $diskReady -eq 1) {
     $passwordError = 'service atau disk belum siap'
 }
 
+__REINSTALLOS_CHROME_FINISH_BLOCK__
+
 Write-Output "OS:$caption"
 Write-Output "PORT22:$([int](22 -in $ports))"
 Write-Output "PORT22022:$([int](22022 -in $ports))"
@@ -4713,8 +4880,14 @@ Write-Output "PASSWORD_READY:$passwordReady"
 if ($diskError) { Write-Output "DISK_ERROR:$diskError" }
 if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
 '''.replace(
+            "__REINSTALLOS_CHROME_START_BLOCK__",
+            chrome_start_script,
+        ).replace(
             "__REINSTALLOS_BRANDING_BLOCK__",
             _windows_branding_powershell(),
+        ).replace(
+            "__REINSTALLOS_CHROME_FINISH_BLOCK__",
+            chrome_finish_script,
         ).replace(
             "__REINSTALLOS_FINAL_PASSWORD__",
             WINDOWS_INSTALL_PASSWORD.replace("'", "''"),
@@ -4722,8 +4895,13 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
             "__REINSTALLOS_CUSTOM_PORT__",
             str(int(preferred_port or FALLBACK_SSH_PORT)),
         )
+        command = (
+            _powershell_encoded_gzip(script)
+            if install_chrome
+            else _powershell_encoded(script)
+        )
         _, stdout, stderr = bootstrap_ssh.exec_command(
-            _powershell_encoded(script), timeout=120
+            command, timeout=600 if install_chrome else 120
         )
         rc, output, error = _read_ssh_streams(stdout, stderr)
         if rc != 0:
@@ -4746,6 +4924,14 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
             return False, "Branding Windows belum dapat dibersihkan: " + branding_error[:250], detected_os
         if values.get("BRANDING_NAME") != WINDOWS_BRAND_NAME:
             return False, "Branding Windows tidak sesuai target ITIL", detected_os
+        if install_chrome:
+            if values.get("CHROME_REQUESTED") != "1":
+                return False, "Finalisasi Chrome tidak dijalankan", detected_os
+            if values.get("CHROME_READY") != "1":
+                chrome_error = values.get("CHROME_ERROR") or "unknown"
+                return False, "Google Chrome belum siap: " + chrome_error[:250], detected_os
+            if not values.get("CHROME_VERSION"):
+                return False, "Versi Google Chrome tidak dapat diverifikasi", detected_os
         if values.get("DISK_READY") != "1":
             disk_error = values.get("DISK_ERROR") or values.get("DISK_STATE") or "unknown"
             return False, "Partisi C belum dapat diperbesar: " + disk_error[:250], detected_os
@@ -4830,6 +5016,11 @@ async def finish_reinstall_job(
                 f"  Pass: {WINDOWS_INSTALL_PASSWORD}"
             )
             detected = verification or "Windows"
+            chrome_status = (
+                "  ● Google Chrome       READY\n"
+                if _windows_requires_chrome(job.get("os_name", ""))
+                else ""
+            )
             result_status = (
                 f"  ● OS: {detected}\n"
                 f"  ● SSH {verified_port:<15} READY\n"
@@ -4838,6 +5029,7 @@ async def finish_reinstall_job(
                 "  ● Branding ITIL       READY\n"
                 "  ● RDP 3389            READY\n"
                 "  ● Disk C              MAXIMUM\n"
+                f"{chrome_status}"
                 "  ● Final Check         VERIFIED\n"
             )
         else:
@@ -4955,6 +5147,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     verify_windows_install_sync,
                     vps_ip,
                     old_port,
+                    _windows_requires_chrome(current.get("os_name", "")),
                 )
                 if not verify_success:
                     logger.info(

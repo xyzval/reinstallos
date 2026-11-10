@@ -139,6 +139,7 @@ Pass:         Digicore@1
 | Windows Remote Access | OpenSSH mempertahankan 22, 22022, dan port khusus yang tersimpan (misalnya 443), dengan RDP tetap aktif di 3389 |
 | Password Final Windows | Kredensial image hanya dipakai saat bootstrap, lalu password `Administrator` dirotasi ke `digicore` dan diuji ulang melalui salah satu endpoint SSH yang benar-benar dapat diautentikasi |
 | Branding Windows ITIL | Finalizer menghapus branding Teddysun yang terlihat pada OEM info, wallpaper, lock-screen policy, dan shortcut; lalu menetapkan owner/manufacturer `ITIL` dengan backup rollback |
+| Chrome untuk LTSC 2024 | Khusus Windows 11 Enterprise LTSC 2024, bot mengunduh MSI Enterprise x64 resmi Google secara paralel dengan finalisasi, memvalidasi tanda tangan Google, memasang secara silent, dan mewajibkan verifikasi versi |
 | Ekspansi Disk Otomatis | Partisi C Windows dan filesystem root Linux otomatis diperbesar ke kapasitas maksimum yang aman sebelum instalasi dinyatakan selesai |
 | Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
 | Detail Jobs & Akses | Status/tahap/waktu/verifikasi ditampilkan rapi; akses final hanya dibuka setelah konfirmasi dan hanya untuk pemilik job terbaru |
@@ -289,6 +290,15 @@ manufacturer/registered owner menjadi `ITIL`, mengembalikan wallpaper ke bawaan
 Windows, dan menghapus shortcut atau lock-screen policy yang bernama Teddysun.
 Bot tidak mengubah bootloader, driver, file sistem, atau mekanisme aktivasi.
 Job hanya dinyatakan selesai setelah branding ITIL ikut terverifikasi.
+
+Khusus pilihan `Windows 11 Enterprise LTSC 2024 (24H2)`, finalizer mengunduh
+MSI Chrome Enterprise 64-bit dari URL resmi Google sejak awal pemeriksaan agar
+transfer tumpang tindih dengan ekspansi disk, branding, dan finalisasi lain.
+Sebelum instalasi machine-wide secara silent, tanda tangan Authenticode wajib
+valid dengan signer `Google LLC`. Bot kemudian memverifikasi `chrome.exe` dan
+versinya serta membuat shortcut publik `Google Chrome.lnk`. Kegagalan pada
+langkah ini menahan job agar tidak salah dilaporkan berhasil. Pilihan Windows
+lama tidak menjalankan instalasi Chrome ini.
 
 **Login melalui port SSH yang terverifikasi (22, 22022, atau port tersimpan seperti 443), atau RDP 3389.**
 
