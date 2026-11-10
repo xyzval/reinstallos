@@ -300,6 +300,12 @@ versinya serta membuat shortcut publik `Google Chrome.lnk`. Kegagalan pada
 langkah ini menahan job agar tidak salah dilaporkan berhasil. Pilihan Windows
 lama tidak menjalankan instalasi Chrome ini.
 
+Untuk uji mirror regional LTSC English, isi
+`WINDOWS_11_LTSC_EN_MIRROR_URL` di `.env`. Sebelum job diluncurkan bot melakukan
+HEAD check dan memastikan ukuran image tepat `3742061012` byte. Jika mirror
+tidak siap atau ukurannya salah, bot otomatis kembali memakai URL Teddysun.
+Bahasa Chinese dan Japanese tetap selalu memakai origin Teddysun.
+
 **Login melalui port SSH yang terverifikasi (22, 22022, atau port tersimpan seperti 443), atau RDP 3389.**
 
 > `digicore` adalah password sederhana sesuai konfigurasi yang diminta. Jika sebuah Windows Server menolak password huruf kecil, bot melonggarkan kebijakan kompleksitas lokal sebelum mencoba kembali. Batasi akses RDP/SSH menggunakan firewall provider bila VPS berada di internet publik.

@@ -126,6 +126,10 @@ CHROME_ENTERPRISE_MSI_URL = (
     "https://dl.google.com/dl/chrome/install/"
     "googlechromestandaloneenterprise64.msi"
 )
+WINDOWS_11_LTSC_EN_MIRROR_URL = os.getenv(
+    "WINDOWS_11_LTSC_EN_MIRROR_URL", ""
+).strip()
+WINDOWS_11_LTSC_EN_IMAGE_BYTES = 3742061012
 WINDOWS_10_DD_IMAGES = {
     "en": "https://dl.lamp.sh/vhd/en-us_windows10_ltsc.xz",
     "en-us": "https://dl.lamp.sh/vhd/en-us_windows10_ltsc.xz",
@@ -3919,6 +3923,24 @@ def _requested_install_ssh_port(data: dict) -> int:
     return port if port not in (FALLBACK_SSH_PORT, PRIMARY_SSH_PORT) else PRIMARY_SSH_PORT
 
 
+def _http_file_ready(url: str, expected_bytes: int, timeout: int = 6) -> bool:
+    """Validate an optional regional mirror before selecting it for a job."""
+    if not url:
+        return False
+    try:
+        request = urllib.request.Request(
+            url,
+            method="HEAD",
+            headers={"User-Agent": "reinstallos-bot/2"},
+        )
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            length = int(response.headers.get("Content-Length") or 0)
+            return response.status == 200 and length == int(expected_bytes)
+    except Exception as exc:
+        logger.warning("Regional mirror unavailable, using origin: %s", str(exc)[:160])
+        return False
+
+
 def _installer_arguments(data: dict) -> list:
     args = shlex.split(str(data["os_cmd"]))
     install_ssh_port = _requested_install_ssh_port(data)
@@ -3934,11 +3956,26 @@ def _installer_arguments(data: dict) -> list:
             "__WIN2019_DD__": WINDOWS_2019_DD_IMAGES,
             "__WIN2022_DD__": WINDOWS_2022_DD_IMAGES,
         }
-        args = [
-            dd_images[item].get(selected_language, dd_images[item]["en"])
-            if item in dd_images else item
-            for item in args
-        ]
+        use_ltsc_mirror = (
+            "__WIN11_LTSC_DD__" in args
+            and selected_language in ("en", "en-us")
+            and _http_file_ready(
+                WINDOWS_11_LTSC_EN_MIRROR_URL,
+                WINDOWS_11_LTSC_EN_IMAGE_BYTES,
+            )
+        )
+        resolved_args = []
+        for item in args:
+            if item == "__WIN11_LTSC_DD__" and use_ltsc_mirror:
+                resolved_args.append(WINDOWS_11_LTSC_EN_MIRROR_URL)
+                logger.info("Using validated regional mirror for Windows 11 LTSC English")
+            elif item in dd_images:
+                resolved_args.append(
+                    dd_images[item].get(selected_language, dd_images[item]["en"])
+                )
+            else:
+                resolved_args.append(item)
+        args = resolved_args
         args.extend([
             "--lang", language,
             "--username", WINDOWS_INSTALL_USER,
