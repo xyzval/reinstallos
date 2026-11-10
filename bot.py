@@ -91,6 +91,10 @@ WINDOWS_OPTIONS = {
     # bin456789 mounts the written NTFS volume, allowing our OpenSSH/RDP hook to
     # configure the final Windows installation before its first boot.
     "win10": {"name": "Windows 10", "cmd": "dd --img __WIN10_DD__"},
+    "win11ltsc": {
+        "name": "Windows 11 Enterprise LTSC 2024 (24H2)",
+        "cmd": "dd --img __WIN11_LTSC_DD__",
+    },
     "win11": {"name": "Windows 11", "cmd": "dd --img __WIN11_DD__"},
     "ws2012": {"name": "Windows Server 2012 R2", "cmd": "dd --img __WIN2012_DD__"},
     "ws2016": {"name": "Windows Server 2016", "cmd": "dd --img __WIN2016_DD__"},
@@ -134,6 +138,17 @@ WINDOWS_11_DD_IMAGES = {
     "jp": "https://dl.lamp.sh/vhd/ja-jp_windows11.xz",
     "ja": "https://dl.lamp.sh/vhd/ja-jp_windows11.xz",
     "ja-jp": "https://dl.lamp.sh/vhd/ja-jp_windows11.xz",
+}
+# Teddysun Windows 11 Enterprise LTSC 2024, build 26100.1742, BIOS/MBR.
+# Published English SHA-1: ea3f5a508d22b1c2d3dd62660a5c523b0db682c1.
+WINDOWS_11_LTSC_DD_IMAGES = {
+    "en": "https://dl.lamp.sh/vhd/en-us_win11_ltsc.xz",
+    "en-us": "https://dl.lamp.sh/vhd/en-us_win11_ltsc.xz",
+    "cn": "https://dl.lamp.sh/vhd/zh-cn_win11_ltsc.xz",
+    "zh-cn": "https://dl.lamp.sh/vhd/zh-cn_win11_ltsc.xz",
+    "jp": "https://dl.lamp.sh/vhd/ja-jp_win11_ltsc.xz",
+    "ja": "https://dl.lamp.sh/vhd/ja-jp_win11_ltsc.xz",
+    "ja-jp": "https://dl.lamp.sh/vhd/ja-jp_win11_ltsc.xz",
 }
 WINDOWS_2012_DD_IMAGES = {
     "en": "https://dl.lamp.sh/vhd/en_win2012r2.xz",
@@ -3826,6 +3841,7 @@ def _installer_arguments(data: dict) -> list:
         dd_images = {
             "__WIN10_DD__": WINDOWS_10_DD_IMAGES,
             "__WIN11_DD__": WINDOWS_11_DD_IMAGES,
+            "__WIN11_LTSC_DD__": WINDOWS_11_LTSC_DD_IMAGES,
             "__WIN2012_DD__": WINDOWS_2012_DD_IMAGES,
             "__WIN2016_DD__": WINDOWS_2016_DD_IMAGES,
             "__WIN2019_DD__": WINDOWS_2019_DD_IMAGES,
@@ -4464,7 +4480,11 @@ def windows_os_matches(requested_os: str, detected_os: str) -> bool:
         years = re.findall(r"20\d{2}", requested)
         return "windows server" in detected and all(year in detected for year in years)
     versions = re.findall(r"windows\s+(10|11)", requested)
-    return bool(versions and f"windows {versions[0]}" in detected)
+    if not versions or f"windows {versions[0]}" not in detected:
+        return False
+    if "enterprise ltsc" in requested:
+        return "enterprise ltsc" in detected
+    return True
 
 
 def verify_windows_install_sync(vps_ip: str, preferred_port: int = 0) -> tuple:

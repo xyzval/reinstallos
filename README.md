@@ -262,6 +262,7 @@ Pilih nomor OS dari menu, selesai!
 |---|---|
 | Windows 10 | Administrator / digicore |
 | Windows 11 | Administrator / digicore |
+| Windows 11 Enterprise LTSC 2024 (24H2) | Administrator / digicore |
 | Windows Server 2012 R2 | Administrator / digicore |
 | Windows Server 2016 | Administrator / digicore |
 | Windows Server 2019 | Administrator / digicore |
@@ -269,10 +270,17 @@ Pilih nomor OS dari menu, selesai!
 
 Semua pilihan Windows memakai pinned DD image BIOS/MBR dari Teddysun sesuai
 bahasa yang dipilih, lalu bot menyuntikkan OpenSSH final sebelum reboot. Jalur
-ini menghindari pencarian ISO otomatis yang lambat atau macet. Windows 10,
-Windows 11, serta Server 2012 R2, 2016, 2019, dan 2022 sudah terverifikasi
-end-to-end sampai kembali ke Debian 12. Image tidak aktif secara otomatis;
-gunakan product key Windows yang sah bila diperlukan.
+ini menghindari pencarian ISO otomatis yang lambat atau macet. Windows 11
+Enterprise LTSC 2024 memakai build 26100.1742 dan tersedia dalam English,
+Chinese, serta Japanese. URL dan header XZ ketiga image sudah divalidasi secara
+non-destruktif; image LTSC baru belum dijalankan pada VPS disposable. Referensi
+image dan checksum publik tersedia di
+[Teddysun](https://teddysun.com/738.html); varian English BIOS/MBR memiliki
+SHA-1 `ea3f5a508d22b1c2d3dd62660a5c523b0db682c1`.
+
+Windows 10, Windows 11 lama, serta Server 2012 R2, 2016, 2019, dan 2022 sudah
+terverifikasi end-to-end sampai kembali ke Debian 12. Image tidak aktif secara
+otomatis; gunakan product key Windows yang sah bila diperlukan.
 
 **Login melalui port SSH yang terverifikasi (22, 22022, atau port tersimpan seperti 443), atau RDP 3389.**
 
