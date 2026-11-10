@@ -4542,10 +4542,8 @@ $chromeRoot = Join-Path $env:ProgramData 'ReinstallOS'
 $chromeInstaller = Join-Path $chromeRoot 'google-chrome-enterprise-x64.msi'
 $chromeCandidates = @()
 if ($env:ProgramFiles) {
+    # The requested Enterprise payload is x64 and must be installed machine-wide.
     $chromeCandidates += Join-Path $env:ProgramFiles 'Google\Chrome\Application\chrome.exe'
-}
-if (${env:ProgramFiles(x86)}) {
-    $chromeCandidates += Join-Path ${env:ProgramFiles(x86)} 'Google\Chrome\Application\chrome.exe'
 }
 if ($chromeRequested -eq 1) {
     $chromeExe = $chromeCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1

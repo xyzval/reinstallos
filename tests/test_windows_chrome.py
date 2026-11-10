@@ -86,6 +86,8 @@ class WindowsChromeTests(unittest.TestCase):
         self.assertIn(bot.CHROME_ENTERPRISE_MSI_URL, start)
         self.assertIn("$chromeRequested = 1", start)
         self.assertIn("DownloadFileTaskAsync", start)
+        self.assertIn("$env:ProgramFiles", start)
+        self.assertNotIn("ProgramFiles(x86)", start)
         self.assertIn("Get-AuthenticodeSignature", finish)
         self.assertIn("CN=Google LLC", finish)
         self.assertIn("/qn /norestart", finish)
