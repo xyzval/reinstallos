@@ -3790,8 +3790,11 @@ def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
     errors = []
     key_path = _safe_saved_key_path(data)
     saved_user = str(data.get("vps_user") or "").strip().lower()
-    key_first = data.get("auth_type") == "bootstrap_key" or not data.get("vps_pass")
-    for port in _ssh_ports(data):
+    saved_password = str(data.get("vps_pass") or "")
+    key_first = data.get("auth_type") == "bootstrap_key" or not saved_password
+    ports = _ssh_ports(data)
+    preferred_port = ports[0] if ports else 0
+    for port in ports:
         for username in _ssh_users(data):
             methods = []
             if key_path and username.lower() == saved_user and key_first:
@@ -3800,25 +3803,47 @@ def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
             if key_path and username.lower() == saved_user and not key_first:
                 methods.append(("key", ""))
             for method, password in methods:
-                ssh = None
-                try:
-                    if method == "key":
-                        ssh = _connect_with_key(
-                            data["vps_ip"], port, username, key_path, timeout=timeout
+                is_saved_endpoint = (
+                    port == preferred_port
+                    and username.lower() == saved_user
+                    and (
+                        (method == "password" and password == saved_password)
+                        or (method == "key" and bool(key_path))
+                    )
+                )
+                max_attempts = 2 if is_saved_endpoint else 1
+                for attempt in range(max_attempts):
+                    ssh = None
+                    try:
+                        if method == "key":
+                            ssh = _connect_with_key(
+                                data["vps_ip"], port, username, key_path, timeout=timeout
+                            )
+                        else:
+                            ssh = _connect_with_credentials(
+                                data["vps_ip"], port, username, password, timeout=timeout
+                            )
+                        remote_os = detect_remote_os_sync(ssh)
+                        return ssh, remote_os, port, username
+                    except Exception as exc:
+                        errors.append(f"{username}@{port}/{method}: {str(exc)[:90]}")
+                        if ssh:
+                            try:
+                                ssh.close()
+                            except Exception:
+                                pass
+                        should_retry = (
+                            attempt + 1 < max_attempts
+                            and not isinstance(exc, paramiko.AuthenticationException)
                         )
-                    else:
-                        ssh = _connect_with_credentials(
-                            data["vps_ip"], port, username, password, timeout=timeout
-                        )
-                    remote_os = detect_remote_os_sync(ssh)
-                    return ssh, remote_os, port, username
-                except Exception as exc:
-                    errors.append(f"{username}@{port}/{method}: {str(exc)[:90]}")
-                    if ssh:
-                        try:
-                            ssh.close()
-                        except Exception:
-                            pass
+                        if should_retry:
+                            logger.info(
+                                "Retrying saved SSH endpoint after transient failure: ip=%s port=%s user=%s error=%s",
+                                data.get("vps_ip"), port, username, str(exc)[:120],
+                            )
+                            _time.sleep(0.75)
+                            continue
+                        break
     raise RuntimeError("; ".join(errors[-4:]) or "Tidak ada endpoint SSH yang dapat diakses")
 
 

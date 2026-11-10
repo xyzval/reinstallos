@@ -142,6 +142,36 @@ class BootstrapTests(unittest.TestCase):
         )
         self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
+    def test_saved_endpoint_retries_one_transient_reset(self):
+        data = {
+            "vps_ip": "203.0.113.10",
+            "vps_port": 443,
+            "vps_user": "Administrator",
+            "vps_pass": bot.WINDOWS_INSTALL_PASSWORD,
+            "auth_type": "password",
+        }
+        connected = _SSH()
+        attempts = []
+
+        def password_connect(ip, port, username, password, timeout=12):
+            attempts.append((ip, port, username, password))
+            if len(attempts) == 1:
+                raise ConnectionResetError("connection reset by peer")
+            return connected
+
+        with patch.object(
+            bot, "_connect_with_credentials", side_effect=password_connect
+        ), patch.object(bot, "detect_remote_os_sync", return_value="windows"), patch.object(
+            bot._time, "sleep"
+        ) as sleep:
+            ssh, remote_os, port, username = bot.connect_target_sync(data)
+
+        self.assertIs(ssh, connected)
+        self.assertEqual((remote_os, port, username), ("windows", 443, "Administrator"))
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(attempts[0], attempts[1])
+        sleep.assert_called_once_with(0.75)
+
     def test_saved_key_remains_a_connection_fallback(self):
         private_path, _ = bot.ensure_user_bootstrap_key(1001)
         data = {
