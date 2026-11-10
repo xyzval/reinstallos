@@ -172,6 +172,40 @@ class BootstrapTests(unittest.TestCase):
         self.assertEqual(attempts[0], attempts[1])
         sleep.assert_called_once_with(0.75)
 
+    def test_persistent_saved_endpoint_reset_stops_before_password_spraying(self):
+        data = {
+            "vps_ip": "203.0.113.10",
+            "vps_port": 443,
+            "vps_user": "Administrator",
+            "vps_pass": bot.WINDOWS_INSTALL_PASSWORD,
+            "auth_type": "password",
+        }
+        attempts = []
+
+        def password_connect(ip, port, username, password, timeout=12):
+            attempts.append((port, username, password))
+            raise ConnectionResetError("connection reset by peer")
+
+        with patch.object(
+            bot, "_connect_with_credentials", side_effect=password_connect
+        ), patch.object(bot._time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "tidak stabil setelah 3 percobaan"):
+                bot.connect_target_sync(data)
+
+        self.assertEqual(len(attempts), 3)
+        self.assertTrue(
+            all(item == (443, "Administrator", bot.WINDOWS_INSTALL_PASSWORD) for item in attempts)
+        )
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(
+            bot._ssh_passwords_for_user(data, "Administrator"),
+            [bot.WINDOWS_INSTALL_PASSWORD, bot.WINDOWS_IMAGE_PASSWORD],
+        )
+        self.assertEqual(
+            bot._ssh_passwords_for_user(data, "root"),
+            [bot.LINUX_INSTALL_PASSWORD],
+        )
+
     def test_saved_key_remains_a_connection_fallback(self):
         private_path, _ = bot.ensure_user_bootstrap_key(1001)
         data = {
@@ -188,7 +222,7 @@ class BootstrapTests(unittest.TestCase):
 
         def password_connect(ip, port, username, password, timeout=12):
             attempts.append(("password", port, username))
-            raise RuntimeError("password unavailable")
+            raise bot.paramiko.AuthenticationException("password unavailable")
 
         def key_connect(ip, port, username, key_path, timeout=12):
             attempts.append(("key", port, username))

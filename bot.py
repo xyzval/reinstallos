@@ -3771,7 +3771,7 @@ def _ssh_users(data: dict) -> list:
 
 
 def _ssh_passwords(data: dict) -> list:
-    """Try the saved secret first, then known post-reinstall credentials."""
+    """Return all known secrets for compatibility and isolated verification."""
     passwords = []
     for password in (
         data.get("vps_pass"),
@@ -3779,6 +3779,26 @@ def _ssh_passwords(data: dict) -> list:
         WINDOWS_IMAGE_PASSWORD,
         LINUX_INSTALL_PASSWORD,
     ):
+        password = str(password or "")
+        if password and password not in passwords:
+            passwords.append(password)
+    return passwords
+
+
+def _ssh_passwords_for_user(data: dict, username: str) -> list:
+    """Avoid spraying Linux passwords at Windows accounts and vice versa."""
+    candidates = []
+    saved_user = str(data.get("vps_user") or "").strip().lower()
+    username_lower = str(username or "").strip().lower()
+    if username_lower == saved_user:
+        candidates.append(data.get("vps_pass"))
+    if username_lower == WINDOWS_INSTALL_USER.lower():
+        candidates.extend((WINDOWS_INSTALL_PASSWORD, WINDOWS_IMAGE_PASSWORD))
+    elif username_lower == LINUX_INSTALL_USER.lower():
+        candidates.append(LINUX_INSTALL_PASSWORD)
+
+    passwords = []
+    for password in candidates:
         password = str(password or "")
         if password and password not in passwords:
             passwords.append(password)
@@ -3799,7 +3819,10 @@ def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
             methods = []
             if key_path and username.lower() == saved_user and key_first:
                 methods.append(("key", ""))
-            methods.extend(("password", password) for password in _ssh_passwords(data))
+            methods.extend(
+                ("password", password)
+                for password in _ssh_passwords_for_user(data, username)
+            )
             if key_path and username.lower() == saved_user and not key_first:
                 methods.append(("key", ""))
             for method, password in methods:
@@ -3811,7 +3834,7 @@ def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
                         or (method == "key" and bool(key_path))
                     )
                 )
-                max_attempts = 2 if is_saved_endpoint else 1
+                max_attempts = 3 if is_saved_endpoint else 1
                 for attempt in range(max_attempts):
                     ssh = None
                     try:
@@ -3843,6 +3866,13 @@ def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
                             )
                             _time.sleep(0.75)
                             continue
+                        if is_saved_endpoint and not isinstance(
+                            exc, paramiko.AuthenticationException
+                        ):
+                            raise RuntimeError(
+                                "Endpoint SSH tersimpan tidak stabil setelah 3 percobaan: "
+                                + str(exc)[:180]
+                            ) from exc
                         break
     raise RuntimeError("; ".join(errors[-4:]) or "Tidak ada endpoint SSH yang dapat diakses")
 
