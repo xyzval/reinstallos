@@ -138,6 +138,7 @@ Pass:         Digicore@1
 | Bootstrap UpCloud Otomatis | `/bootstrapkey` membuat key Ed25519 terisolasi per user dan cloud-init siap tempel; Wizard mengubah akses key-only menjadi login password tanpa SSH manual |
 | Windows Remote Access | OpenSSH mempertahankan 22, 22022, dan port khusus yang tersimpan (misalnya 443), dengan RDP tetap aktif di 3389 |
 | Password Final Windows | Kredensial image hanya dipakai saat bootstrap, lalu password `Administrator` dirotasi ke `digicore` dan diuji ulang melalui salah satu endpoint SSH yang benar-benar dapat diautentikasi |
+| Branding Windows ITIL | Finalizer menghapus branding Teddysun yang terlihat pada OEM info, wallpaper, lock-screen policy, dan shortcut; lalu menetapkan owner/manufacturer `ITIL` dengan backup rollback |
 | Ekspansi Disk Otomatis | Partisi C Windows dan filesystem root Linux otomatis diperbesar ke kapasitas maksimum yang aman sebelum instalasi dinyatakan selesai |
 | Background Reinstall Jobs | VPS berbeda berjalan bersamaan; saat slot penuh job masuk antrean otomatis dan tetap persisten setelah restart |
 | Detail Jobs & Akses | Status/tahap/waktu/verifikasi ditampilkan rapi; akses final hanya dibuka setelah konfirmasi dan hanya untuk pemilik job terbaru |
@@ -281,6 +282,13 @@ SHA-1 `ea3f5a508d22b1c2d3dd62660a5c523b0db682c1`.
 Windows 10, Windows 11 lama, serta Server 2012 R2, 2016, 2019, dan 2022 sudah
 terverifikasi end-to-end sampai kembali ke Debian 12. Image tidak aktif secara
 otomatis; gunakan product key Windows yang sah bila diperlukan.
+
+Pada finalisasi seluruh versi Windows, bot membuat backup branding awal di
+`C:\ProgramData\ReinstallOS\branding-before-ITIL.json`, menetapkan OEM
+manufacturer/registered owner menjadi `ITIL`, mengembalikan wallpaper ke bawaan
+Windows, dan menghapus shortcut atau lock-screen policy yang bernama Teddysun.
+Bot tidak mengubah bootloader, driver, file sistem, atau mekanisme aktivasi.
+Job hanya dinyatakan selesai setelah branding ITIL ikut terverifikasi.
 
 **Login melalui port SSH yang terverifikasi (22, 22022, atau port tersimpan seperti 443), atau RDP 3389.**
 

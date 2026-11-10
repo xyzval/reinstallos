@@ -193,6 +193,7 @@ WINDOWS_INSTALL_USER = "Administrator"
 # to the requested final credential and verify an authenticated SSH endpoint.
 WINDOWS_IMAGE_PASSWORD = "Teddysun.com"
 WINDOWS_INSTALL_PASSWORD = "digicore"
+WINDOWS_BRAND_NAME = "ITIL"
 # The installer configures 22/22022 and retains a saved custom port. External
 # verification accepts one authenticated endpoint; 443 supports UpCloud trial
 # networks that block inter-VPS TCP on the standard SSH ports.
@@ -890,6 +891,7 @@ def get_job_detail_text(job: dict) -> str:
             lines.extend([
                 "  Login Administrator: READY",
                 "  Password final     : READY",
+                "  Branding ITIL      : READY",
                 "  RDP 3389           : READY",
                 "  Disk C             : MAXIMUM",
             ])
@@ -4487,6 +4489,97 @@ def windows_os_matches(requested_os: str, detected_os: str) -> bool:
     return True
 
 
+def _windows_branding_powershell() -> str:
+    """Return an idempotent, narrowly scoped OEM/wallpaper cleanup script."""
+    return r'''
+$brandingReady = 0
+$brandingError = ''
+try {
+    $brandName = '__REINSTALLOS_BRAND_NAME__'
+    $oemPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\OEMInformation'
+    $currentVersionPath = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $desktopPath = 'HKCU:\Control Panel\Desktop'
+    $backupDir = Join-Path $env:ProgramData 'ReinstallOS'
+    $backupPath = Join-Path $backupDir 'branding-before-ITIL.json'
+
+    New-Item -ItemType Directory -Path $backupDir -Force -ErrorAction Stop | Out-Null
+    if (-not (Test-Path -LiteralPath $backupPath)) {
+        $oemBefore = Get-ItemProperty -Path $oemPath -ErrorAction SilentlyContinue
+        $versionBefore = Get-ItemProperty -Path $currentVersionPath -ErrorAction SilentlyContinue
+        $desktopBefore = Get-ItemProperty -Path $desktopPath -ErrorAction SilentlyContinue
+        [ordered]@{
+            Manufacturer = [string]$oemBefore.Manufacturer
+            SupportURL = [string]$oemBefore.SupportURL
+            SupportPhone = [string]$oemBefore.SupportPhone
+            SupportHours = [string]$oemBefore.SupportHours
+            Logo = [string]$oemBefore.Logo
+            RegisteredOwner = [string]$versionBefore.RegisteredOwner
+            RegisteredOrganization = [string]$versionBefore.RegisteredOrganization
+            Wallpaper = [string]$desktopBefore.Wallpaper
+        } | ConvertTo-Json | Set-Content -LiteralPath $backupPath -Encoding UTF8 -ErrorAction Stop
+    }
+
+    New-Item -Path $oemPath -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -Path $oemPath -Name 'Manufacturer' -Value $brandName -PropertyType String -Force -ErrorAction Stop | Out-Null
+    foreach ($propertyName in @('SupportURL', 'SupportPhone', 'SupportHours', 'Logo')) {
+        Remove-ItemProperty -Path $oemPath -Name $propertyName -ErrorAction SilentlyContinue
+    }
+    New-ItemProperty -Path $currentVersionPath -Name 'RegisteredOwner' -Value $brandName -PropertyType String -Force -ErrorAction Stop | Out-Null
+    New-ItemProperty -Path $currentVersionPath -Name 'RegisteredOrganization' -Value $brandName -PropertyType String -Force -ErrorAction Stop | Out-Null
+
+    $wallpaper = Join-Path $env:SystemRoot 'Web\Wallpaper\Windows\img0.jpg'
+    if (-not (Test-Path -LiteralPath $wallpaper)) { $wallpaper = '' }
+    foreach ($registryPath in @($desktopPath, 'Registry::HKEY_USERS\.DEFAULT\Control Panel\Desktop')) {
+        New-Item -Path $registryPath -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $registryPath -Name 'Wallpaper' -Value $wallpaper -PropertyType String -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $registryPath -Name 'WallpaperStyle' -Value '10' -PropertyType String -Force -ErrorAction Stop | Out-Null
+        New-ItemProperty -Path $registryPath -Name 'TileWallpaper' -Value '0' -PropertyType String -Force -ErrorAction Stop | Out-Null
+    }
+    $wallpaperCache = Join-Path $env:APPDATA 'Microsoft\Windows\Themes\TranscodedWallpaper'
+    Remove-Item -LiteralPath $wallpaperCache -Force -ErrorAction SilentlyContinue
+
+    $personalizationPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization'
+    if (Test-Path -Path $personalizationPath) {
+        $lockScreenImage = (Get-ItemProperty -Path $personalizationPath -Name 'LockScreenImage' -ErrorAction SilentlyContinue).LockScreenImage
+        if ([string]$lockScreenImage -match '(?i)teddysun') {
+            Remove-ItemProperty -Path $personalizationPath -Name 'LockScreenImage' -ErrorAction SilentlyContinue
+        }
+    }
+
+    $brandingRoots = @(
+        (Join-Path $env:PUBLIC 'Desktop'),
+        (Join-Path $env:USERPROFILE 'Desktop'),
+        (Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'),
+        (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+    )
+    foreach ($root in $brandingRoots) {
+        if (Test-Path -LiteralPath $root) {
+            Get-ChildItem -LiteralPath $root -Force -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '(?i)teddysun' } |
+                Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        }
+    }
+
+    $oemAfter = Get-ItemProperty -Path $oemPath -ErrorAction Stop
+    $versionAfter = Get-ItemProperty -Path $currentVersionPath -ErrorAction Stop
+    $wallpaperAfter = (Get-ItemProperty -Path $desktopPath -ErrorAction Stop).Wallpaper
+    if ([string]$oemAfter.Manufacturer -ne $brandName) { throw 'Manufacturer belum berubah' }
+    if ([string]$versionAfter.RegisteredOwner -ne $brandName) { throw 'RegisteredOwner belum berubah' }
+    if ([string]$versionAfter.RegisteredOrganization -ne $brandName) { throw 'RegisteredOrganization belum berubah' }
+    if ([string]$wallpaperAfter -match '(?i)teddysun') { throw 'Wallpaper lama masih aktif' }
+    $brandingReady = 1
+} catch {
+    $brandingError = ($_.Exception.Message -replace '[\r\n]+', ' ')
+}
+Write-Output "BRANDING_READY:$brandingReady"
+Write-Output "BRANDING_NAME:__REINSTALLOS_BRAND_NAME__"
+if ($brandingError) { Write-Output "BRANDING_ERROR:$brandingError" }
+'''.replace(
+        "__REINSTALLOS_BRAND_NAME__",
+        WINDOWS_BRAND_NAME.replace("'", "''"),
+    )
+
+
 def verify_windows_install_sync(vps_ip: str, preferred_port: int = 0) -> tuple:
     """Finalize Windows, retaining a custom SSH port such as UpCloud 443."""
     detected_os = ""
@@ -4573,6 +4666,8 @@ try {
     $diskError = ($_.Exception.Message -replace '[\r\n]+', ' ')
 }
 
+__REINSTALLOS_BRANDING_BLOCK__
+
 $passwordReady = 0
 $passwordError = ''
 if ($servicesReady -eq 1 -and $diskReady -eq 1) {
@@ -4618,6 +4713,9 @@ Write-Output "PASSWORD_READY:$passwordReady"
 if ($diskError) { Write-Output "DISK_ERROR:$diskError" }
 if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
 '''.replace(
+            "__REINSTALLOS_BRANDING_BLOCK__",
+            _windows_branding_powershell(),
+        ).replace(
             "__REINSTALLOS_FINAL_PASSWORD__",
             WINDOWS_INSTALL_PASSWORD.replace("'", "''"),
         ).replace(
@@ -4643,6 +4741,11 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
         missing = [key for key, value in required.items() if values.get(key) != value]
         if missing:
             return False, "Verifikasi service Windows belum lengkap: " + ", ".join(missing), detected_os
+        if values.get("BRANDING_READY") != "1":
+            branding_error = values.get("BRANDING_ERROR") or "unknown"
+            return False, "Branding Windows belum dapat dibersihkan: " + branding_error[:250], detected_os
+        if values.get("BRANDING_NAME") != WINDOWS_BRAND_NAME:
+            return False, "Branding Windows tidak sesuai target ITIL", detected_os
         if values.get("DISK_READY") != "1":
             disk_error = values.get("DISK_ERROR") or values.get("DISK_STATE") or "unknown"
             return False, "Partisi C belum dapat diperbesar: " + disk_error[:250], detected_os
@@ -4732,6 +4835,7 @@ async def finish_reinstall_job(
                 f"  ● SSH {verified_port:<15} READY\n"
                 f"  ● SSH {alternate_port:<15} OPTIONAL\n"
                 "  ● Password final      READY\n"
+                "  ● Branding ITIL       READY\n"
                 "  ● RDP 3389            READY\n"
                 "  ● Disk C              MAXIMUM\n"
                 "  ● Final Check         VERIFIED\n"
