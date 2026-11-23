@@ -4171,8 +4171,12 @@ def _installer_arguments(data: dict) -> list:
             else:
                 resolved_args.append(item)
         args = resolved_args
+        # The upstream parser accepts --lang for native `windows` installs, but
+        # rejects it for `dd`.  DD language is already encoded by the selected
+        # image URL, so passing --lang makes the installer exit immediately.
+        if args and args[0].lower() == "windows":
+            args.extend(["--lang", language])
         args.extend([
-            "--lang", language,
             "--username", WINDOWS_INSTALL_USER,
             "--password", WINDOWS_INSTALL_PASSWORD,
             "--ssh-port", str(install_ssh_port),
@@ -4215,7 +4219,12 @@ def _launch_from_linux(ssh, data: dict, reinstall_sh: bytes, openssh_zip: bytes)
         _sftp_put_bytes(ssh, f"{remote_dir}/reinstallos-openssh.zip", openssh_zip, 0o600)
 
     argv = ["bash", f"{remote_dir}/reinstall.sh", *_installer_arguments(data)]
-    command = f"{shlex.join(argv)} && reboot"
+    exit_file = f"{remote_dir}/exit.code"
+    command = (
+        f"{shlex.join(argv)}; rc=$?; "
+        f"if [ \"$rc\" -eq 0 ]; then reboot; "
+        f"else printf '%s\\n' \"$rc\" >{exit_file}; exit \"$rc\"; fi"
+    )
     launch_command = (
         "nohup sh -c " + shlex.quote(command) +
         f" </dev/null >{remote_dir}/installer.log 2>&1 & echo $!"
@@ -4225,7 +4234,31 @@ def _launch_from_linux(ssh, data: dict, reinstall_sh: bytes, openssh_zip: bytes)
     pid_text = output.splitlines()
     if not pid_text or not pid_text[-1].isdigit():
         raise RuntimeError(error[:300] or "PID installer Linux tidak diterima")
-    return pid_text[-1]
+
+    pid = pid_text[-1]
+    _time.sleep(2)
+    health_command = (
+        f"if [ -f {exit_file} ]; then printf 'FAILED:'; cat {exit_file}; "
+        f"elif kill -0 {pid} 2>/dev/null; then printf RUNNING; "
+        "else printf UNKNOWN; fi"
+    )
+    try:
+        _, stdout, stderr = ssh.exec_command(health_command, timeout=15)
+        _, health, health_error = _read_ssh_streams(stdout, stderr)
+    except Exception:
+        # A connection drop can mean the successful installer already rebooted.
+        return pid
+    if health.startswith("FAILED:"):
+        exit_code = health.split(":", 1)[1].strip() or "unknown"
+        raise RuntimeError(
+            f"Installer berhenti segera dengan exit code {exit_code}; "
+            f"lihat {remote_dir}/installer.log"
+        )
+    if health != "RUNNING":
+        raise RuntimeError(
+            "Status proses installer tidak dapat dikonfirmasi; installer tidak dimonitor sebagai berjalan"
+        )
+    return pid
 
 
 def _launch_from_windows(

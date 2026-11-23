@@ -37,6 +37,26 @@ class WindowsLTSCTests(unittest.TestCase):
                 self.assertIn("443", arguments)
                 self.assertIn("3389", arguments)
 
+    def test_every_dd_windows_option_omits_unsupported_lang_flag(self):
+        for option_key, option in bot.WINDOWS_OPTIONS.items():
+            for language in ("en", "cn", "jp"):
+                with self.subTest(option=option_key, language=language), patch.object(
+                    bot, "WINDOWS_11_LTSC_EN_MIRROR_URL", ""
+                ):
+                    arguments = bot._installer_arguments({
+                        "vps_port": 443,
+                        "os_type": "windows",
+                        "os_cmd": option["cmd"],
+                        "lang": language,
+                    })
+                self.assertEqual(arguments[0], "dd")
+                self.assertNotIn("--lang", arguments)
+                self.assertNotIn(language, arguments[1:])
+                self.assertIn("--username", arguments)
+                self.assertIn("--password", arguments)
+                self.assertIn("--ssh-port", arguments)
+                self.assertIn("--rdp-port", arguments)
+
     def test_optional_english_mirror_is_validated_with_origin_fallback(self):
         data = {
             "vps_port": 443,

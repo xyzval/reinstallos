@@ -346,6 +346,34 @@ class BootstrapTests(unittest.TestCase):
         launch.assert_not_called()
         self.assertTrue(connected.closed)
 
+    def test_linux_launcher_rejects_process_that_exits_immediately(self):
+        class LaunchSSH:
+            def __init__(self):
+                self.commands = []
+
+            def exec_command(self, command, timeout=None):
+                self.commands.append(command)
+                if len(self.commands) == 1:
+                    return None, _Stream(), _Stream()
+                if len(self.commands) == 2:
+                    return None, _Stream(b"30970\n"), _Stream()
+                return None, _Stream(b"FAILED:2"), _Stream()
+
+        ssh = LaunchSSH()
+        with patch.object(bot, "_sftp_put_bytes"), patch.object(
+            bot, "_installer_arguments", return_value=["dd", "--img", "image.xz"]
+        ), patch.object(bot._time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "exit code 2"):
+                bot._launch_from_linux(ssh, {}, b"installer", b"")
+
+        self.assertIn("exit.code", ssh.commands[1])
+        self.assertIn("kill -0 30970", ssh.commands[2])
+        syntax = subprocess.run(
+            ["sh", "-n"], input=ssh.commands[1], text=True,
+            capture_output=True, check=False,
+        )
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
     def test_launch_state_must_persist_before_installer_command(self):
         data = {
             "vps_ip": "203.0.113.10",
