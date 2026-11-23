@@ -55,6 +55,8 @@ class _WindowsSSH:
             "DISK_READY:1\n"
             "DISK_STATE:ALREADY_MAX\n"
             "PASSWORD_READY:1\n"
+            "FINAL_USER:Administrator\n"
+            "FINAL_USER_READY:1\n"
         ).encode()
         return None, _Stream(output), _Stream()
 

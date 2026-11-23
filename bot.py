@@ -25,6 +25,7 @@ import time as _time
 import shlex
 import urllib.request
 import uuid
+import secrets
 import paramiko
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -197,7 +198,13 @@ WINDOWS_2022_DD_IMAGES = {
 }
 LINUX_INSTALL_USER = "root"
 LINUX_INSTALL_PASSWORD = "Digicore@1"
+# A fresh Windows image always starts with this bootstrap account. New jobs
+# replace it with one stable six-character account per VPS, verify fresh SSH
+# authentication, and only then disable the predictable built-in account.
 WINDOWS_INSTALL_USER = "Administrator"
+WINDOWS_LOGIN_LETTERS = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+WINDOWS_LOGIN_ALPHABET = WINDOWS_LOGIN_LETTERS + "23456789"
+WINDOWS_LOGIN_LENGTH = 6
 # Pinned DD images boot with the vendor credential; successful jobs rotate it
 # to the requested final credential and verify an authenticated SSH endpoint.
 WINDOWS_IMAGE_PASSWORD = "Teddysun.com"
@@ -263,6 +270,88 @@ def save_vps_list(user_id: int, vps_list: list):
         _atomic_write_json(VPS_FILE, data)
     except Exception as e:
         logger.error(f"Save VPS error: {e}")
+
+
+def is_managed_windows_username(username: str) -> bool:
+    """Return True only for the short unambiguous usernames generated here."""
+    value = str(username or "").strip().upper()
+    return bool(
+        len(value) == WINDOWS_LOGIN_LENGTH
+        and all(character in WINDOWS_LOGIN_ALPHABET for character in value)
+    )
+
+
+def generate_windows_login_user(existing=()) -> str:
+    """Generate a readable six-character username with cryptographic randomness."""
+    used = {str(item or "").strip().upper() for item in existing}
+    for _ in range(128):
+        candidate = secrets.choice(WINDOWS_LOGIN_LETTERS) + "".join(
+            secrets.choice(WINDOWS_LOGIN_ALPHABET)
+            for _ in range(WINDOWS_LOGIN_LENGTH - 1)
+        )
+        if candidate not in used:
+            return candidate
+    raise RuntimeError("Username Windows acak tidak dapat dibuat tanpa bentrok")
+
+
+def ensure_windows_login_user(user_id: int, data: dict) -> str:
+    """Persist one stable managed Windows username for this user's VPS record."""
+    if str(data.get("os_type") or "") != "windows":
+        return ""
+
+    vps_list = load_vps_list(user_id)
+    target_ip = str(data.get("vps_ip") or "")
+    try:
+        target_port = int(data.get("vps_port") or FALLBACK_SSH_PORT)
+    except (TypeError, ValueError):
+        target_port = FALLBACK_SSH_PORT
+    exact = None
+    fallback = None
+    for item in vps_list:
+        if str(item.get("vps_ip") or "") != target_ip:
+            continue
+        fallback = fallback or item
+        try:
+            item_port = int(item.get("vps_port") or FALLBACK_SSH_PORT)
+        except (TypeError, ValueError):
+            item_port = FALLBACK_SSH_PORT
+        if item_port == target_port:
+            exact = item
+            break
+    record = exact or fallback
+
+    candidates = [
+        data.get("windows_login_user"),
+        record.get("windows_login_user") if record else "",
+    ]
+    # This safely adopts a manually-created managed account such as the current
+    # 8GCRNS recovery user instead of replacing it on the next reinstall.
+    if str(data.get("vps_pass") or "") == WINDOWS_INSTALL_PASSWORD:
+        candidates.append(data.get("vps_user"))
+    username = next(
+        (
+            str(candidate).strip().upper()
+            for candidate in candidates
+            if is_managed_windows_username(candidate)
+        ),
+        "",
+    )
+    if not username:
+        username = generate_windows_login_user(
+            item.get("windows_login_user") for item in vps_list
+        )
+
+    data["windows_login_user"] = username
+    if record is not None and record.get("windows_login_user") != username:
+        record["windows_login_user"] = username
+        save_vps_list(user_id, vps_list)
+    return username
+
+
+def windows_job_login_user(job: dict) -> str:
+    """Use the persisted random account, with safe fallback for legacy jobs."""
+    username = str(job.get("windows_login_user") or "").strip().upper()
+    return username if is_managed_windows_username(username) else WINDOWS_INSTALL_USER
 
 
 def load_authorized_users() -> dict:
@@ -599,6 +688,7 @@ def create_reinstall_job(user_id: int, chat_id: int, message_id: int, data: dict
     jobs = prune_reinstall_jobs(load_reinstall_jobs())
     now = int(_time.time())
     job_id = "J" + _time.strftime("%y%m%d-%H%M%S", _time.gmtime(now)) + "-" + uuid.uuid4().hex[:6]
+    windows_login_user = ensure_windows_login_user(user_id, data)
     job = {
         "job_id": job_id,
         "user_id": str(user_id),
@@ -612,6 +702,7 @@ def create_reinstall_job(user_id: int, chat_id: int, message_id: int, data: dict
         "os_cmd": str(data["os_cmd"]),
         "os_engine": str(data.get("os_engine", "")),
         "lang": str(data.get("lang", "")),
+        "windows_login_user": windows_login_user,
         "status": "queued",
         "progress": 0,
         "offline_seen": False,
@@ -711,7 +802,9 @@ def find_job_vps_credentials(job: dict):
     if not credentials:
         return None
     data = dict(credentials)
-    for key in ("os_name", "os_type", "os_cmd", "os_engine", "lang"):
+    for key in (
+        "os_name", "os_type", "os_cmd", "os_engine", "lang", "windows_login_user"
+    ):
         data[key] = job.get(key, "")
     return data
 
@@ -747,9 +840,11 @@ def get_job_access_text(job: dict) -> str:
         return "❌ Detail akses tidak ditemukan pada data VPS milik Anda."
 
     ip = str(job.get("vps_ip", "-"))
-    username = str(credentials.get("vps_user") or (
-        WINDOWS_INSTALL_USER if job.get("os_type") == "windows" else LINUX_INSTALL_USER
-    ))
+    username = (
+        windows_job_login_user(job)
+        if job.get("os_type") == "windows"
+        else str(credentials.get("vps_user") or LINUX_INSTALL_USER)
+    )
     password = str(credentials.get("vps_pass", "-"))
     verified_port = int(
         job.get("verified_ssh_port")
@@ -897,8 +992,13 @@ def get_job_detail_text(job: dict) -> str:
                 "  Disk root          : MAXIMUM",
             ])
         else:
+            final_username = windows_job_login_user(job)
+            administrator_state = (
+                "DISABLED" if final_username != WINDOWS_INSTALL_USER else "LEGACY"
+            )
             lines.extend([
-                "  Login Administrator: READY",
+                f"  Login {final_username}: READY",
+                f"  Administrator      : {administrator_state}",
                 "  Password final     : READY",
                 "  Branding ITIL      : READY",
                 "  RDP 3389           : READY",
@@ -2671,7 +2771,7 @@ async def edit_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     ps_password = new_pass.replace("'", "''")
     windows_change_ps = (
-        f"$u=[ADSI]'WinNT://./{WINDOWS_INSTALL_USER},user'; "
+        "$u=[ADSI](\"WinNT://./$env:USERNAME,user\"); "
         f"$u.SetPassword('{ps_password}'); "
         "Write-Output 'PASS_CHANGED'"
     )
@@ -2683,7 +2783,11 @@ async def edit_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Update saved VPS data
         old_port = int(data.get('vps_port', FALLBACK_SSH_PORT))
         data['vps_pass'] = new_pass
-        data['vps_user'] = WINDOWS_INSTALL_USER if detected_os == "windows" else LINUX_INSTALL_USER
+        data['vps_user'] = (
+            connected_user if detected_os == "windows" else LINUX_INSTALL_USER
+        )
+        if detected_os == "windows" and is_managed_windows_username(connected_user):
+            data['windows_login_user'] = connected_user.upper()
         data['vps_port'] = connected_port or old_port
         context.user_data.update({
             'vps_pass': new_pass,
@@ -2699,6 +2803,8 @@ async def edit_pass_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 v['vps_pass'] = new_pass
                 v['vps_user'] = data['vps_user']
                 v['vps_port'] = data['vps_port']
+                if data.get('windows_login_user'):
+                    v['windows_login_user'] = data['windows_login_user']
                 break
         save_vps_list(user_id, vps_list)
 
@@ -3311,8 +3417,10 @@ async def show_confirm(query, context: ContextTypes.DEFAULT_TYPE) -> int:
         else "22 (utama) / 22022 (fallback)"
     )
     if os_type == "windows":
+        windows_login_user = ensure_windows_login_user(query.from_user.id, data)
         summary += (
-            f"\n  🔑 Login: Administrator / {WINDOWS_INSTALL_PASSWORD}\n"
+            f"\n  🔑 Login akhir: {windows_login_user} / {WINDOWS_INSTALL_PASSWORD}\n"
+            "  🛡 Administrator dinonaktifkan setelah akun baru terverifikasi\n"
             f"  🔐 SSH: {ssh_summary}\n"
             "  🖥️ RDP: 3389\n"
         )
@@ -4825,27 +4933,151 @@ if ($brandingError) { Write-Output "BRANDING_ERROR:$brandingError" }
     )
 
 
+def disable_windows_bootstrap_admin_sync(
+    vps_ip: str,
+    port: int,
+    final_username: str,
+) -> tuple:
+    """Disable SID-500 only from a freshly authenticated replacement admin."""
+    if not is_managed_windows_username(final_username):
+        return False, "Username Windows final tidak valid"
+    ssh = None
+    try:
+        ssh = _connect_with_credentials(
+            vps_ip,
+            int(port),
+            final_username,
+            WINDOWS_INSTALL_PASSWORD,
+            timeout=15,
+        )
+        if detect_remote_os_sync(ssh) != "windows":
+            raise RuntimeError("endpoint bukan Windows")
+        script = r'''
+$ErrorActionPreference = 'Stop'
+$finalAccount = '__REINSTALLOS_FINAL_USERNAME__'
+$accounts = if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+    @(Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True')
+} else {
+    @(Get-WmiObject Win32_UserAccount -Filter 'LocalAccount=True')
+}
+$final = $accounts | Where-Object { $_.Name -ieq $finalAccount } | Select-Object -First 1
+$builtin = $accounts | Where-Object { [string]$_.SID -match '-500$' } | Select-Object -First 1
+if (-not $final) { throw 'akun final tidak ditemukan' }
+if (-not $builtin) { throw 'akun built-in SID-500 tidak ditemukan' }
+if ([string]$final.SID -eq [string]$builtin.SID) { throw 'akun final masih SID-500' }
+
+& net.exe user "$($builtin.Name)" /active:no 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "gagal menonaktifkan SID-500, exit $LASTEXITCODE" }
+
+$accounts = if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+    @(Get-CimInstance Win32_UserAccount -Filter 'LocalAccount=True')
+} else {
+    @(Get-WmiObject Win32_UserAccount -Filter 'LocalAccount=True')
+}
+$final = $accounts | Where-Object { $_.Name -ieq $finalAccount } | Select-Object -First 1
+$builtin = $accounts | Where-Object { [string]$_.SID -match '-500$' } | Select-Object -First 1
+if (-not $final -or [bool]$final.Disabled) { throw 'akun final tidak aktif' }
+if (-not [bool]$builtin.Disabled) { throw 'akun built-in masih aktif' }
+
+function Resolve-LocalGroupName([string]$sidValue) {
+    $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+    $account = $sid.Translate([Security.Principal.NTAccount]).Value
+    return ($account -split '\\')[-1]
+}
+function Test-LocalGroupMember([string]$groupName, [string]$accountName) {
+    $group = [ADSI]("WinNT://$env:COMPUTERNAME/$groupName,group")
+    $names = @($group.psbase.Invoke('Members')) | ForEach-Object {
+        $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
+    }
+    return [bool]($names | Where-Object { $_ -ieq $accountName })
+}
+$adminReady = Test-LocalGroupMember (Resolve-LocalGroupName 'S-1-5-32-544') $finalAccount
+$rdpReady = Test-LocalGroupMember (Resolve-LocalGroupName 'S-1-5-32-555') $finalAccount
+$rdpEnabled = [int]((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server').fDenyTSConnections -eq 0)
+$rdpListening = [int](3389 -in @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort))
+if (-not $adminReady -or -not $rdpReady -or $rdpEnabled -ne 1 -or $rdpListening -ne 1) {
+    throw 'verifikasi admin/RDP akun final gagal'
+}
+Write-Output "FINAL_USER:$finalAccount"
+Write-Output "FINAL_USER_ENABLED:$([int](-not [bool]$final.Disabled))"
+Write-Output "FINAL_USER_ADMIN:$([int]$adminReady)"
+Write-Output "FINAL_USER_RDP:$([int]$rdpReady)"
+Write-Output "ADMINISTRATOR_DISABLED:$([int][bool]$builtin.Disabled)"
+Write-Output "RDP_ENABLED:$rdpEnabled"
+Write-Output "RDP_LISTENING:$rdpListening"
+'''.replace(
+            "__REINSTALLOS_FINAL_USERNAME__",
+            final_username.replace("'", "''"),
+        )
+        _, stdout, stderr = ssh.exec_command(
+            _powershell_encoded_gzip(script), timeout=120
+        )
+        rc, output, error = _read_ssh_streams(stdout, stderr)
+        if rc != 0:
+            return False, (error or output or "Penonaktifan Administrator gagal")[:300]
+        values = {}
+        for line in output.splitlines():
+            if ":" in line:
+                key, value = line.strip().split(":", 1)
+                values[key] = value.strip()
+        required = {
+            "FINAL_USER": final_username,
+            "FINAL_USER_ENABLED": "1",
+            "FINAL_USER_ADMIN": "1",
+            "FINAL_USER_RDP": "1",
+            "ADMINISTRATOR_DISABLED": "1",
+            "RDP_ENABLED": "1",
+            "RDP_LISTENING": "1",
+        }
+        missing = [key for key, value in required.items() if values.get(key) != value]
+        if missing:
+            return False, "Verifikasi akun final belum lengkap: " + ", ".join(missing)
+        return True, ""
+    except Exception as exc:
+        return False, str(exc)[:300]
+    finally:
+        if ssh:
+            try:
+                ssh.close()
+            except Exception:
+                pass
+
+
 def verify_windows_install_sync(
     vps_ip: str,
     preferred_port: int = 0,
     install_chrome: bool = False,
+    final_username: str = WINDOWS_INSTALL_USER,
 ) -> tuple:
-    """Finalize Windows, retaining custom SSH and requested Chrome setup."""
+    """Finalize Windows and switch safely from SID-500 to the managed account."""
     detected_os = ""
     bootstrap_ssh = None
     bootstrap_errors = []
+    final_username = str(final_username or WINDOWS_INSTALL_USER).strip().upper()
+    managed_final_user = is_managed_windows_username(final_username)
+    if not managed_final_user:
+        # Active jobs created by an older bot release finish through the legacy
+        # Administrator path instead of inventing an unrecoverable username.
+        final_username = WINDOWS_INSTALL_USER
     chrome_start_script, chrome_finish_script = _windows_chrome_powershell_blocks(
         install_chrome
     )
 
-    # A fresh raw DD image may still use its vendor credential. Recovered jobs
-    # may already have rotated it, so try the requested final credential first.
+    # Recovery can resume after SID-500 was already disabled, so try the stable
+    # final account first. A fresh image then falls back to its bootstrap user.
+    connection_candidates = []
+    if managed_final_user:
+        connection_candidates.append((final_username, WINDOWS_INSTALL_PASSWORD))
+    connection_candidates.extend([
+        (WINDOWS_INSTALL_USER, WINDOWS_INSTALL_PASSWORD),
+        (WINDOWS_INSTALL_USER, WINDOWS_IMAGE_PASSWORD),
+    ])
     for port in _ordered_ssh_ports(preferred_port):
-        for password in (WINDOWS_INSTALL_PASSWORD, WINDOWS_IMAGE_PASSWORD):
+        for username, password in connection_candidates:
             candidate = None
             try:
                 candidate = _connect_with_credentials(
-                    vps_ip, port, WINDOWS_INSTALL_USER, password
+                    vps_ip, port, username, password
                 )
                 if detect_remote_os_sync(candidate) != "windows":
                     raise RuntimeError("endpoint bukan Windows")
@@ -4853,7 +5085,7 @@ def verify_windows_install_sync(
                 candidate = None
                 break
             except Exception as exc:
-                bootstrap_errors.append(f"Administrator@{port}: {str(exc)[:120]}")
+                bootstrap_errors.append(f"{username}@{port}: {str(exc)[:120]}")
             finally:
                 if candidate:
                     try:
@@ -4924,15 +5156,29 @@ try {
 __REINSTALLOS_BRANDING_BLOCK__
 
 $passwordReady = 0
+$finalUserReady = 0
 $passwordError = ''
+$finalUserError = ''
 if ($servicesReady -eq 1 -and $diskReady -eq 1) {
     try {
         $desiredPassword = '__REINSTALLOS_FINAL_PASSWORD__'
-        $accountName = $env:USERNAME
-        & net.exe user "$accountName" "$desiredPassword" | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            # The user explicitly requested a lowercase password. Older Server
-            # images can enforce complexity, so relax only the local policy and retry.
+        $finalAccount = '__REINSTALLOS_FINAL_USERNAME__'
+
+        function Set-FinalAccountPassword {
+            & net.exe user "$finalAccount" 2>&1 | Out-Null
+            $accountExists = ($LASTEXITCODE -eq 0)
+            if ($accountExists) {
+                & net.exe user "$finalAccount" "$desiredPassword" /active:yes 2>&1 | Out-Null
+            } else {
+                & net.exe user "$finalAccount" "$desiredPassword" /add /active:yes 2>&1 | Out-Null
+            }
+            return $LASTEXITCODE
+        }
+
+        $passwordExit = Set-FinalAccountPassword
+        if ($passwordExit -ne 0) {
+            # The requested lowercase password can violate an old image's local
+            # policy. Relax only password complexity/length, then retry exactly once.
             $cfg = Join-Path $env:TEMP 'reinstallos-security.inf'
             $db = Join-Path $env:TEMP 'reinstallos-security.sdb'
             & secedit.exe /export /cfg $cfg /quiet | Out-Null
@@ -4944,15 +5190,63 @@ if ($servicesReady -eq 1 -and $diskReady -eq 1) {
             & secedit.exe /configure /db $db /cfg $cfg /areas SECURITYPOLICY /quiet | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'gagal menerapkan local security policy' }
             & net.exe accounts /minpwlen:0 | Out-Null
-            & net.exe user "$accountName" "$desiredPassword" | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "net user exit $LASTEXITCODE" }
+            $passwordExit = Set-FinalAccountPassword
+            if ($passwordExit -ne 0) { throw "net user exit $passwordExit" }
+        }
+
+        function Resolve-LocalGroupName([string]$sidValue) {
+            $sid = New-Object Security.Principal.SecurityIdentifier($sidValue)
+            $account = $sid.Translate([Security.Principal.NTAccount]).Value
+            return ($account -split '\\')[-1]
+        }
+        function Ensure-LocalGroupMember([string]$groupName, [string]$accountName) {
+            $group = [ADSI]("WinNT://$env:COMPUTERNAME/$groupName,group")
+            $names = @($group.psbase.Invoke('Members')) | ForEach-Object {
+                $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
+            }
+            if (-not ($names | Where-Object { $_ -ieq $accountName })) {
+                $group.Add("WinNT://$env:COMPUTERNAME/$accountName,user")
+            }
+        }
+        function Test-LocalGroupMember([string]$groupName, [string]$accountName) {
+            $group = [ADSI]("WinNT://$env:COMPUTERNAME/$groupName,group")
+            $names = @($group.psbase.Invoke('Members')) | ForEach-Object {
+                $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null)
+            }
+            return [bool]($names | Where-Object { $_ -ieq $accountName })
+        }
+
+        $adminGroup = Resolve-LocalGroupName 'S-1-5-32-544'
+        $rdpGroup = Resolve-LocalGroupName 'S-1-5-32-555'
+        Ensure-LocalGroupMember $adminGroup $finalAccount
+        Ensure-LocalGroupMember $rdpGroup $finalAccount
+
+        $account = [ADSI]("WinNT://$env:COMPUTERNAME/$finalAccount,user")
+        $flags = [int]$account.UserFlags.Value
+        $account.Put('UserFlags', (($flags -bor 0x10000) -band (-bnot 0x2)))
+        $account.Put('Description', 'ITIL managed RDP administrator')
+        $account.SetInfo()
+        try {
+            $account.IsAccountLocked = $false
+            $account.SetInfo()
+        } catch {}
+
+        $account = [ADSI]("WinNT://$env:COMPUTERNAME/$finalAccount,user")
+        $enabled = (([int]$account.UserFlags.Value -band 0x2) -eq 0)
+        $adminReady = Test-LocalGroupMember $adminGroup $finalAccount
+        $rdpReady = Test-LocalGroupMember $rdpGroup $finalAccount
+        if (-not $enabled -or -not $adminReady -or -not $rdpReady) {
+            throw 'akun final belum aktif atau grup admin/RDP belum lengkap'
         }
         $passwordReady = 1
+        $finalUserReady = 1
     } catch {
         $passwordError = ($_.Exception.Message -replace '[\r\n]+', ' ')
+        $finalUserError = $passwordError
     }
 } else {
     $passwordError = 'service atau disk belum siap'
+    $finalUserError = $passwordError
 }
 
 __REINSTALLOS_CHROME_FINISH_BLOCK__
@@ -4967,8 +5261,11 @@ Write-Output "DISK_STATE:$diskState"
 Write-Output "DISK_BEFORE_GB:$diskBeforeGB"
 Write-Output "DISK_AFTER_GB:$diskAfterGB"
 Write-Output "PASSWORD_READY:$passwordReady"
+Write-Output "FINAL_USER:$finalAccount"
+Write-Output "FINAL_USER_READY:$finalUserReady"
 if ($diskError) { Write-Output "DISK_ERROR:$diskError" }
 if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
+if ($finalUserError) { Write-Output "FINAL_USER_ERROR:$finalUserError" }
 '''.replace(
             "__REINSTALLOS_CHROME_START_BLOCK__",
             chrome_start_script,
@@ -4982,14 +5279,16 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
             "__REINSTALLOS_FINAL_PASSWORD__",
             WINDOWS_INSTALL_PASSWORD.replace("'", "''"),
         ).replace(
+            "__REINSTALLOS_FINAL_USERNAME__",
+            final_username.replace("'", "''"),
+        ).replace(
             "__REINSTALLOS_CUSTOM_PORT__",
             str(int(preferred_port or FALLBACK_SSH_PORT)),
         )
-        command = (
-            _powershell_encoded_gzip(script)
-            if install_chrome
-            else _powershell_encoded(script)
-        )
+        # The account-provisioning and branding blocks exceed safe Windows
+        # command-line sizes when sent as plain UTF-16 base64. Compress for all
+        # Windows variants, not only the Chrome-enabled LTSC option.
+        command = _powershell_encoded_gzip(script)
         _, stdout, stderr = bootstrap_ssh.exec_command(
             command, timeout=600 if install_chrome else 120
         )
@@ -5027,7 +5326,10 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
             return False, "Partisi C belum dapat diperbesar: " + disk_error[:250], detected_os
         if values.get("PASSWORD_READY") != "1":
             password_error = values.get("PASSWORD_ERROR") or "unknown"
-            return False, "Password Administrator belum dapat diubah: " + password_error[:250], detected_os
+            return False, "Password akun Windows final belum siap: " + password_error[:250], detected_os
+        if values.get("FINAL_USER_READY") != "1" or values.get("FINAL_USER") != final_username:
+            final_user_error = values.get("FINAL_USER_ERROR") or "unknown"
+            return False, "Akun Windows final belum siap: " + final_user_error[:250], detected_os
     except Exception as exc:
         return False, f"Finalisasi Windows gagal: {str(exc)[:250]}", detected_os
     finally:
@@ -5039,17 +5341,36 @@ if ($passwordError) { Write-Output "PASSWORD_ERROR:$passwordError" }
     if not detected_os:
         return False, "Nama Windows tidak dapat dibaca", ""
 
-    # Do not trust the bootstrap session. Authenticate the final credential on
-    # port 22 first and fall back to 22022; either one is sufficient.
+    # Do not trust the provisioning session. Authenticate the final credential
+    # from a fresh connection before changing the predictable SID-500 account.
     verified_port, verify_error = find_working_ssh_port_sync(
         vps_ip,
-        WINDOWS_INSTALL_USER,
+        final_username,
         WINDOWS_INSTALL_PASSWORD,
         "windows",
         preferred_port=preferred_port,
     )
     if not verified_port:
-        return False, "Password baru gagal diverifikasi: " + verify_error[:300], detected_os
+        return False, "Akun final gagal diverifikasi: " + verify_error[:300], detected_os
+
+    if managed_final_user:
+        disabled, disable_error = disable_windows_bootstrap_admin_sync(
+            vps_ip,
+            verified_port,
+            final_username,
+        )
+        if not disabled:
+            return False, "Administrator belum aman dinonaktifkan: " + disable_error[:300], detected_os
+        # Prove that disabling SID-500 did not break the replacement account.
+        post_disable_port, post_disable_error = find_working_ssh_port_sync(
+            vps_ip,
+            final_username,
+            WINDOWS_INSTALL_PASSWORD,
+            "windows",
+            preferred_port=verified_port,
+        )
+        if not post_disable_port:
+            return False, "Login akun final gagal setelah Administrator dinonaktifkan: " + post_disable_error[:300], detected_os
     return True, "", detected_os[:200]
 
 
@@ -5062,8 +5383,11 @@ def update_vps_credentials_after_reinstall(job: dict, verified_port: int = 0) ->
         if vps.get("vps_ip") != job.get("vps_ip"):
             continue
         if job.get("os_type") == "windows":
-            vps["vps_user"] = WINDOWS_INSTALL_USER
+            final_username = windows_job_login_user(job)
+            vps["vps_user"] = final_username
             vps["vps_pass"] = WINDOWS_INSTALL_PASSWORD
+            if is_managed_windows_username(final_username):
+                vps["windows_login_user"] = final_username
         else:
             vps["vps_user"] = LINUX_INSTALL_USER
             vps["vps_pass"] = LINUX_INSTALL_PASSWORD
@@ -5098,11 +5422,12 @@ async def finish_reinstall_job(
             PRIMARY_SSH_PORT if verified_port == FALLBACK_SSH_PORT else FALLBACK_SSH_PORT
         )
         if job.get("os_type") == "windows":
+            final_username = windows_job_login_user(job)
             login = (
-                f"  SSH: ssh -p {verified_port} Administrator@{job['vps_ip']}\n"
+                f"  SSH: ssh -p {verified_port} {final_username}@{job['vps_ip']}\n"
                 f"  SSH alternatif: port {alternate_port} (opsional)\n"
                 f"  RDP: {job['vps_ip']}:3389\n"
-                "  User: Administrator\n"
+                f"  User: {final_username}\n"
                 f"  Pass: {WINDOWS_INSTALL_PASSWORD}"
             )
             detected = verification or "Windows"
@@ -5111,10 +5436,17 @@ async def finish_reinstall_job(
                 if _windows_requires_chrome(job.get("os_name", ""))
                 else ""
             )
+            account_status = (
+                "  ● Administrator       DISABLED\n"
+                if final_username != WINDOWS_INSTALL_USER
+                else ""
+            )
             result_status = (
                 f"  ● OS: {detected}\n"
                 f"  ● SSH {verified_port:<15} READY\n"
                 f"  ● SSH {alternate_port:<15} OPTIONAL\n"
+                f"  ● Login {final_username:<12} READY\n"
+                f"{account_status}"
                 "  ● Password final      READY\n"
                 "  ● Branding ITIL       READY\n"
                 "  ● RDP 3389            READY\n"
@@ -5233,11 +5565,13 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
         # Give the final SSH endpoint a short stabilization window before authenticating.
         if ready_for_verification and int(_time.time()) - target_online_since >= 45:
             if current.get("os_type") == "windows":
+                final_username = windows_job_login_user(current)
                 verify_success, verify_error, detected_os = await asyncio.to_thread(
                     verify_windows_install_sync,
                     vps_ip,
                     old_port,
                     _windows_requires_chrome(current.get("os_name", "")),
+                    final_username,
                 )
                 if not verify_success:
                     logger.info(
@@ -5263,7 +5597,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                 verified_port, access_error = await asyncio.to_thread(
                     find_working_ssh_port_sync,
                     vps_ip,
-                    WINDOWS_INSTALL_USER,
+                    final_username,
                     WINDOWS_INSTALL_PASSWORD,
                     "windows",
                     preferred_port=old_port,

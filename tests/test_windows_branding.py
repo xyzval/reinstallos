@@ -2,6 +2,8 @@
 """Regression tests for safe Windows branding cleanup and verification."""
 
 import base64
+import gzip
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -49,6 +51,8 @@ class _WindowsSSH:
             "DISK_READY:1\n"
             "DISK_STATE:ALREADY_MAX\n"
             "PASSWORD_READY:1\n"
+            "FINAL_USER:Administrator\n"
+            "FINAL_USER_READY:1\n"
         ).encode()
         return None, _Stream(output), _Stream()
 
@@ -82,8 +86,11 @@ class WindowsBrandingTests(unittest.TestCase):
 
         self.assertTrue(ok, error)
         self.assertIn("Windows 11 Enterprise LTSC", detected)
+        self.assertLess(len(ssh.commands[-1]), 32767)
         encoded = ssh.commands[-1].rsplit(" ", 1)[-1]
-        script = base64.b64decode(encoded).decode("utf-16le")
+        wrapper = base64.b64decode(encoded).decode("utf-16le")
+        payload = re.search(r"FromBase64String\('([^']+)'\)", wrapper).group(1)
+        script = gzip.decompress(base64.b64decode(payload)).decode("utf-8")
         self.assertIn("branding-before-ITIL.json", script)
         self.assertIn('Write-Output "BRANDING_NAME:ITIL"', script)
         self.assertNotIn("__REINSTALLOS_BRANDING_BLOCK__", script)

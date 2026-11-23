@@ -30,7 +30,8 @@ class WindowsLTSCTests(unittest.TestCase):
                     "os_cmd": bot.WINDOWS_OPTIONS["win11ltsc"]["cmd"],
                     "lang": language,
                 }
-                arguments = bot._installer_arguments(data)
+                with patch.object(bot, "WINDOWS_11_LTSC_EN_MIRROR_URL", ""):
+                    arguments = bot._installer_arguments(data)
                 self.assertIn(image_url, arguments)
                 self.assertNotIn("__WIN11_LTSC_DD__", arguments)
                 self.assertIn("443", arguments)

@@ -262,13 +262,22 @@ Pilih nomor OS dari menu, selesai!
 
 | OS | Login Default |
 |---|---|
-| Windows 10 | Administrator / digicore |
-| Windows 11 | Administrator / digicore |
-| Windows 11 Enterprise LTSC 2024 (24H2) | Administrator / digicore |
-| Windows Server 2012 R2 | Administrator / digicore |
-| Windows Server 2016 | Administrator / digicore |
-| Windows Server 2019 | Administrator / digicore |
-| Windows Server 2022 | Administrator / digicore |
+| Windows 10 | akun acak 6 karakter / digicore |
+| Windows 11 | akun acak 6 karakter / digicore |
+| Windows 11 Enterprise LTSC 2024 (24H2) | akun acak 6 karakter / digicore |
+| Windows Server 2012 R2 | akun acak 6 karakter / digicore |
+| Windows Server 2016 | akun acak 6 karakter / digicore |
+| Windows Server 2019 | akun acak 6 karakter / digicore |
+| Windows Server 2022 | akun acak 6 karakter / digicore |
+
+Bot membuat satu username Windows enam karakter yang mudah dibaca untuk setiap
+VPS (tanpa `I`, `O`, `0`, atau `1`), menyimpannya sebelum job diluncurkan, dan
+memakainya kembali pada reinstall berikutnya. Finalizer membuat akun tersebut,
+memberinya hak Administrator dan Remote Desktop Users, lalu memverifikasi login
+SSH baru. Akun built-in SID-500 `Administrator` hanya dinonaktifkan setelah
+verifikasi itu berhasil; jika pembuatan atau autentikasi akun baru gagal, akun
+bootstrap tetap aktif agar VPS tidak terkunci. Job lama tanpa metadata username
+acak tetap memakai jalur `Administrator` lama agar recovery kompatibel.
 
 Semua pilihan Windows memakai pinned DD image BIOS/MBR dari Teddysun sesuai
 bahasa yang dipilih, lalu bot menyuntikkan OpenSSH final sebelum reboot. Jalur
