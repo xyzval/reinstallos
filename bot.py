@@ -17,6 +17,7 @@ import asyncio
 import base64
 import gzip
 import hashlib
+import hmac
 import re
 import socket
 import subprocess
@@ -711,6 +712,9 @@ def create_reinstall_job(user_id: int, chat_id: int, message_id: int, data: dict
         "updated_at": now,
         "completed_at": 0,
         "target_online_since": 0,
+        "preflight_verified": False,
+        "launch_attempted": False,
+        "installer_launched": False,
         "verification": "",
         "error": "",
     }
@@ -1798,9 +1802,43 @@ def _load_private_key(key_path: str):
     raise RuntimeError("Private key bootstrap tidak dapat dibaca")
 
 
-def _connect_with_key(vps_ip: str, port: int, username: str, key_path: str, timeout: int = 12):
+class _HostKeyMismatchError(paramiko.SSHException):
+    pass
+
+
+class _PinnedHostKeyPolicy(paramiko.MissingHostKeyPolicy):
+    """Reject a host-key mismatch before Paramiko sends any credentials."""
+
+    def __init__(self, expected_fingerprint: str):
+        self.expected_fingerprint = str(expected_fingerprint or "").strip()
+
+    def missing_host_key(self, client, hostname, key):
+        digest = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode("ascii")
+        actual = "SHA256:" + digest.rstrip("=")
+        if not hmac.compare_digest(actual, self.expected_fingerprint):
+            raise _HostKeyMismatchError(
+                f"identitas host tidak cocok (diharapkan {self.expected_fingerprint}, diterima {actual})"
+            )
+
+
+def _set_ssh_host_key_policy(ssh, expected_fingerprint: str = "") -> None:
+    expected = str(expected_fingerprint or "").strip()
+    if expected:
+        ssh.set_missing_host_key_policy(_PinnedHostKeyPolicy(expected))
+    else:
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+
+def _connect_with_key(
+    vps_ip: str,
+    port: int,
+    username: str,
+    key_path: str,
+    timeout: int = 12,
+    expected_host_key: str = "",
+):
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    _set_ssh_host_key_policy(ssh, expected_host_key)
     try:
         ssh.connect(
             vps_ip,
@@ -3127,6 +3165,8 @@ Write-Output 'PORT_CONFIGURED'
     for v in vps_list:
         if v["vps_ip"] == data["vps_ip"] and int(v["vps_port"]) == old_port:
             v["vps_port"] = new_port
+            if data.get("ssh_host_key_sha256"):
+                v["ssh_host_key_sha256"] = data["ssh_host_key_sha256"]
             break
     save_vps_list(user_id, vps_list)
 
@@ -3519,7 +3559,10 @@ async def report_reinstall_stage(
     progress: int,
     elapsed_seconds: int = 0,
 ) -> None:
-    job = update_reinstall_job(job_id, status=phase, progress=progress)
+    fields = {"status": phase, "progress": progress}
+    if phase == "launching":
+        fields["launch_attempted"] = True
+    job = update_reinstall_job(job_id, **fields)
     if job:
         await edit_job_progress(
             application,
@@ -3873,135 +3916,179 @@ def _ssh_ports(data: dict) -> list:
     return _ordered_ssh_ports(data.get("vps_port", FALLBACK_SSH_PORT))
 
 
-def _ssh_users(data: dict) -> list:
-    users = []
-    for user in (data.get("vps_user"), WINDOWS_INSTALL_USER, LINUX_INSTALL_USER):
-        user = str(user or "").strip()
-        if user and user.lower() not in {item.lower() for item in users}:
-            users.append(user)
-    return users
+def _ssh_host_key_sha256(ssh) -> str:
+    """Return the authenticated transport's host-key fingerprint."""
+    transport = ssh.get_transport()
+    key = transport.get_remote_server_key() if transport else None
+    if key is None:
+        raise RuntimeError("host key SSH tidak tersedia")
+    digest = base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode("ascii")
+    return "SHA256:" + digest.rstrip("=")
 
 
-def _ssh_passwords(data: dict) -> list:
-    """Return all known secrets for compatibility and isolated verification."""
-    passwords = []
-    for password in (
-        data.get("vps_pass"),
-        WINDOWS_INSTALL_PASSWORD,
-        WINDOWS_IMAGE_PASSWORD,
-        LINUX_INSTALL_PASSWORD,
-    ):
-        password = str(password or "")
-        if password and password not in passwords:
-            passwords.append(password)
-    return passwords
-
-
-def _ssh_passwords_for_user(data: dict, username: str) -> list:
-    """Avoid spraying Linux passwords at Windows accounts and vice versa."""
-    candidates = []
-    saved_user = str(data.get("vps_user") or "").strip().lower()
-    username_lower = str(username or "").strip().lower()
-    if username_lower == saved_user:
-        candidates.append(data.get("vps_pass"))
-    if username_lower == WINDOWS_INSTALL_USER.lower():
-        candidates.extend((WINDOWS_INSTALL_PASSWORD, WINDOWS_IMAGE_PASSWORD))
-    elif username_lower == LINUX_INSTALL_USER.lower():
-        candidates.append(LINUX_INSTALL_PASSWORD)
-
-    passwords = []
-    for password in candidates:
-        password = str(password or "")
-        if password and password not in passwords:
-            passwords.append(password)
-    return passwords
+def _verify_connected_host_identity(data: dict, ssh, port: int, preferred_port: int) -> str:
+    """Pin a saved endpoint and require that pin on every alternative port."""
+    actual = _ssh_host_key_sha256(ssh)
+    expected = str(data.get("ssh_host_key_sha256") or "").strip()
+    if expected and not hmac.compare_digest(actual, expected):
+        raise _HostKeyMismatchError(
+            f"identitas host tidak cocok (diharapkan {expected}, diterima {actual})"
+        )
+    if not expected:
+        if int(port) != int(preferred_port):
+            raise RuntimeError(
+                "identitas host belum tersimpan; port alternatif tidak boleh diadopsi"
+            )
+        data["ssh_host_key_sha256"] = actual
+    return actual
 
 
 def connect_target_sync(data: dict, timeout: int = 15) -> tuple:
-    """Connect using the saved endpoint first, with isolated key fallback."""
+    """Verify saved credentials on a pinned endpoint, then adopt it safely."""
     errors = []
     key_path = _safe_saved_key_path(data)
-    saved_user = str(data.get("vps_user") or "").strip().lower()
+    username = str(data.get("vps_user") or "").strip()
     saved_password = str(data.get("vps_pass") or "")
     key_first = data.get("auth_type") == "bootstrap_key" or not saved_password
     ports = _ssh_ports(data)
     preferred_port = ports[0] if ports else 0
+    saved_transport_failed = False
+
+    methods = []
+    if key_path and key_first:
+        methods.append(("key", ""))
+    if saved_password:
+        methods.append(("password", saved_password))
+    if key_path and not key_first:
+        methods.append(("key", ""))
+    if not username or not methods:
+        raise RuntimeError("Identitas SSH tersimpan tidak lengkap")
+
     for port in ports:
-        for username in _ssh_users(data):
-            methods = []
-            if key_path and username.lower() == saved_user and key_first:
-                methods.append(("key", ""))
-            methods.extend(
-                ("password", password)
-                for password in _ssh_passwords_for_user(data, username)
+        is_saved_port = port == preferred_port
+        expected_host_key = str(data.get("ssh_host_key_sha256") or "").strip()
+        if not is_saved_port and not expected_host_key:
+            raise RuntimeError(
+                "Identitas host belum tersimpan; port alternatif tidak dicoba agar host-key check tetap ketat"
             )
-            if key_path and username.lower() == saved_user and not key_first:
-                methods.append(("key", ""))
-            for method, password in methods:
-                is_saved_endpoint = (
-                    port == preferred_port
-                    and username.lower() == saved_user
-                    and (
-                        (method == "password" and password == saved_password)
-                        or (method == "key" and bool(key_path))
-                    )
-                )
-                max_attempts = 3 if is_saved_endpoint else 1
-                for attempt in range(max_attempts):
-                    ssh = None
-                    try:
-                        if method == "key":
-                            ssh = _connect_with_key(
-                                data["vps_ip"], port, username, key_path, timeout=timeout
-                            )
-                        else:
-                            ssh = _connect_with_credentials(
-                                data["vps_ip"], port, username, password, timeout=timeout
-                            )
-                        remote_os = detect_remote_os_sync(ssh)
-                        return ssh, remote_os, port, username
-                    except Exception as exc:
-                        errors.append(f"{username}@{port}/{method}: {str(exc)[:90]}")
-                        if ssh:
-                            try:
-                                ssh.close()
-                            except Exception:
-                                pass
-                        should_retry = (
-                            attempt + 1 < max_attempts
-                            and not isinstance(exc, paramiko.AuthenticationException)
+        stop_saved_port = False
+        for method, password in methods:
+            max_attempts = 3 if is_saved_port else 1
+            for attempt in range(max_attempts):
+                ssh = None
+                try:
+                    connect_kwargs = {"timeout": timeout}
+                    if expected_host_key:
+                        connect_kwargs["expected_host_key"] = expected_host_key
+                    if method == "key":
+                        ssh = _connect_with_key(
+                            data["vps_ip"], port, username, key_path, **connect_kwargs
                         )
-                        if should_retry:
-                            logger.info(
-                                "Retrying saved SSH endpoint after transient failure: ip=%s port=%s user=%s error=%s",
-                                data.get("vps_ip"), port, username, str(exc)[:120],
-                            )
-                            _time.sleep(0.75)
-                            continue
-                        if is_saved_endpoint and not isinstance(
-                            exc, paramiko.AuthenticationException
-                        ):
-                            raise RuntimeError(
-                                "Endpoint SSH tersimpan tidak stabil setelah 3 percobaan: "
-                                + str(exc)[:180]
-                            ) from exc
-                        break
+                    else:
+                        ssh = _connect_with_credentials(
+                            data["vps_ip"], port, username, password, **connect_kwargs
+                        )
+                    fingerprint = _verify_connected_host_identity(
+                        data, ssh, port, preferred_port
+                    )
+                    remote_os = detect_remote_os_sync(ssh)
+                    data["ssh_host_key_sha256"] = fingerprint
+                    data["vps_port"] = int(port)
+                    data["vps_user"] = username
+                    return ssh, remote_os, port, username
+                except Exception as exc:
+                    errors.append(f"{username}@{port}/{method}: {str(exc)[:90]}")
+                    connected_before_failure = ssh is not None
+                    if ssh:
+                        try:
+                            ssh.close()
+                        except Exception:
+                            pass
+                    if isinstance(exc, _HostKeyMismatchError):
+                        raise RuntimeError(str(exc)[:300]) from exc
+                    if connected_before_failure:
+                        raise RuntimeError(
+                            "Endpoint SSH terautentikasi tetapi command verifikasi gagal: "
+                            + str(exc)[:180]
+                        ) from exc
+                    should_retry = (
+                        is_saved_port
+                        and attempt + 1 < max_attempts
+                        and not isinstance(exc, paramiko.AuthenticationException)
+                    )
+                    if should_retry:
+                        logger.info(
+                            "Retrying saved SSH endpoint after transient failure: ip=%s port=%s user=%s error=%s",
+                            data.get("vps_ip"), port, username, str(exc)[:120],
+                        )
+                        _time.sleep(0.75)
+                        continue
+                    if is_saved_port and not isinstance(
+                        exc, paramiko.AuthenticationException
+                    ):
+                        saved_transport_failed = True
+                        stop_saved_port = True
+                        logger.warning(
+                            "Saved SSH endpoint unavailable; trying alternative ports with the saved identity only: ip=%s port=%s user=%s error=%s",
+                            data.get("vps_ip"), port, username, str(exc)[:120],
+                        )
+                    break
+            if stop_saved_port:
+                break
+
+    if saved_transport_failed:
+        raise RuntimeError(
+            "Endpoint SSH tersimpan tidak stabil; port alternatif dengan kredensial tersimpan juga gagal: "
+            + ("; ".join(errors[-4:]) or "tidak ada endpoint terautentikasi")
+        )
     raise RuntimeError("; ".join(errors[-4:]) or "Tidak ada endpoint SSH yang dapat diakses")
 
 
 def verify_exact_ssh_port_sync(data: dict, port: int) -> tuple:
-    """Authenticate to one exact port instead of silently falling back."""
+    """Verify one exact port with only the saved identity and pinned host key."""
     errors = []
-    for username in _ssh_users(data):
+    username = str(data.get("vps_user") or "").strip()
+    password = str(data.get("vps_pass") or "")
+    key_path = _safe_saved_key_path(data)
+    key_first = data.get("auth_type") == "bootstrap_key" or not password
+    methods = []
+    if key_path and key_first:
+        methods.append("key")
+    if password:
+        methods.append("password")
+    if key_path and not key_first:
+        methods.append("key")
+    if not username or not methods:
+        return False, "", "", "identitas SSH tersimpan tidak lengkap"
+
+    expected = str(data.get("ssh_host_key_sha256") or "").strip()
+    for method in methods:
         ssh = None
         try:
-            ssh = _connect_with_credentials(
-                data["vps_ip"], int(port), username, data["vps_pass"]
-            )
+            if method == "key":
+                ssh = _connect_with_key(
+                    data["vps_ip"],
+                    int(port),
+                    username,
+                    key_path,
+                    expected_host_key=expected,
+                )
+            else:
+                ssh = _connect_with_credentials(
+                    data["vps_ip"],
+                    int(port),
+                    username,
+                    password,
+                    expected_host_key=expected,
+                )
+            fingerprint = _ssh_host_key_sha256(ssh)
+            if expected and fingerprint != expected:
+                raise RuntimeError("identitas host port baru tidak cocok")
             remote_os = detect_remote_os_sync(ssh)
+            data["ssh_host_key_sha256"] = fingerprint
             return True, remote_os, username, ""
         except Exception as exc:
-            errors.append(f"{username}: {str(exc)[:120]}")
+            errors.append(f"{method}: {str(exc)[:160]}")
         finally:
             if ssh:
                 try:
@@ -4195,8 +4282,13 @@ def _launch_from_windows(
     return "windows-task"
 
 
-def launch_reinstall_sync(data: dict, stage_callback=None) -> tuple:
-    """Detect the source OS, upload the matching installer, and launch it detached."""
+def launch_reinstall_sync(
+    data: dict,
+    stage_callback=None,
+    preflight_callback=None,
+    launch_attempt_callback=None,
+) -> tuple:
+    """Authenticate and pin the source host before launching its installer."""
     def report(stage: str) -> None:
         if stage_callback:
             try:
@@ -4208,14 +4300,19 @@ def launch_reinstall_sync(data: dict, stage_callback=None) -> tuple:
     try:
         ssh, source_os, connected_port, connected_user = connect_target_sync(data, timeout=20)
         logger.info(
-            "Reinstall source detected: ip=%s os=%s ssh_port=%s user=%s",
+            "Reinstall preflight verified: ip=%s os=%s ssh_port=%s user=%s host_key=%s",
             data.get("vps_ip"), source_os, connected_port, connected_user,
+            data.get("ssh_host_key_sha256"),
         )
+        if preflight_callback:
+            preflight_callback(data)
         report("downloading")
         reinstall_sh, reinstall_bat, openssh_zip = _prepare_installer_assets(
             data.get("os_type") == "windows",
             _requested_install_ssh_port(data),
         )
+        if launch_attempt_callback:
+            launch_attempt_callback()
         report("launching")
         if source_os == "windows":
             token = _launch_from_windows(
@@ -4338,21 +4435,32 @@ def linux_os_matches(requested_os: str, detected_os: str) -> bool:
     return bool(family and family in detected and all(version in detected for version in versions))
 
 
-def _connect_with_credentials(vps_ip: str, port: int, username: str, password: str, timeout: int = 12):
+def _connect_with_credentials(
+    vps_ip: str,
+    port: int,
+    username: str,
+    password: str,
+    timeout: int = 12,
+    expected_host_key: str = "",
+):
     ssh = paramiko.SSHClient()
-    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh.connect(
-        vps_ip,
-        port=int(port),
-        username=username,
-        password=password,
-        timeout=timeout,
-        banner_timeout=timeout,
-        auth_timeout=timeout,
-        allow_agent=False,
-        look_for_keys=False,
-    )
-    return ssh
+    _set_ssh_host_key_policy(ssh, expected_host_key)
+    try:
+        ssh.connect(
+            vps_ip,
+            port=int(port),
+            username=username,
+            password=password,
+            timeout=timeout,
+            banner_timeout=timeout,
+            auth_timeout=timeout,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        return ssh
+    except Exception:
+        ssh.close()
+        raise
 
 
 def find_working_ssh_port_sync(
@@ -4362,6 +4470,7 @@ def find_working_ssh_port_sync(
     expected_os: str,
     timeout: int = 12,
     preferred_port: int = 0,
+    details: dict = None,
 ) -> tuple:
     """Return the first authenticated endpoint, preferring the saved port.
 
@@ -4378,6 +4487,8 @@ def find_working_ssh_port_sync(
             remote_os = detect_remote_os_sync(ssh)
             if remote_os != expected_os:
                 raise RuntimeError(f"endpoint bukan {expected_os}")
+            if details is not None:
+                details["ssh_host_key_sha256"] = _ssh_host_key_sha256(ssh)
             return port, ""
         except Exception as exc:
             errors.append(f"SSH {port}: {str(exc)[:180]}")
@@ -5374,6 +5485,52 @@ if ($finalUserError) { Write-Output "FINAL_USER_ERROR:$finalUserError" }
     return True, "", detected_os[:200]
 
 
+def persist_reinstall_preflight_endpoint(
+    user_id: int, original_port: int, data: dict
+) -> None:
+    """Adopt only a host-key-pinned, authenticated source endpoint."""
+    fingerprint = str(data.get("ssh_host_key_sha256") or "").strip()
+    verified_port = int(data.get("vps_port") or 0)
+    verified_user = str(data.get("vps_user") or "").strip()
+    if not fingerprint.startswith("SHA256:") or not verified_port or not verified_user:
+        raise RuntimeError("hasil preflight SSH tidak lengkap; endpoint tidak disimpan")
+
+    vps_list = load_vps_list(int(user_id))
+    exact = None
+    fallback = None
+    for vps in vps_list:
+        if vps.get("vps_ip") != data.get("vps_ip"):
+            continue
+        fallback = fallback or vps
+        try:
+            current_port = int(vps.get("vps_port") or FALLBACK_SSH_PORT)
+        except (TypeError, ValueError):
+            current_port = FALLBACK_SSH_PORT
+        if current_port == int(original_port):
+            exact = vps
+            break
+    record = exact or fallback
+    if record is None:
+        raise RuntimeError("data VPS sumber tidak ditemukan saat menyimpan preflight")
+
+    record["vps_port"] = verified_port
+    record["vps_user"] = verified_user
+    record["ssh_host_key_sha256"] = fingerprint
+    save_vps_list(int(user_id), vps_list)
+    persisted = next(
+        (
+            item
+            for item in load_vps_list(int(user_id))
+            if item.get("vps_ip") == data.get("vps_ip")
+            and str(item.get("vps_port") or "") == str(verified_port)
+            and item.get("ssh_host_key_sha256") == fingerprint
+        ),
+        None,
+    )
+    if persisted is None:
+        raise RuntimeError("hasil preflight SSH gagal disimpan; installer belum dijalankan")
+
+
 def update_vps_credentials_after_reinstall(job: dict, verified_port: int = 0) -> None:
     """Switch that user's isolated VPS record to the verified target credentials."""
     user_id = int(job["user_id"])
@@ -5392,10 +5549,29 @@ def update_vps_credentials_after_reinstall(job: dict, verified_port: int = 0) ->
             vps["vps_user"] = LINUX_INSTALL_USER
             vps["vps_pass"] = LINUX_INSTALL_PASSWORD
         vps["vps_port"] = int(verified_port or job.get("verified_ssh_port") or FALLBACK_SSH_PORT)
+        final_fingerprint = str(job.get("final_ssh_host_key_sha256") or "").strip()
+        if final_fingerprint:
+            vps["ssh_host_key_sha256"] = final_fingerprint
+        else:
+            # A reinstalled OS normally generates a new host key.  Never retain
+            # the source OS pin as if it represented the replacement system.
+            vps.pop("ssh_host_key_sha256", None)
         changed = True
         break
     if changed:
         save_vps_list(user_id, vps_list)
+
+def reinstall_failure_launch_notice(job: dict) -> str:
+    """Describe launch state without claiming more certainty than persisted facts."""
+    if job.get("installer_launched"):
+        return "Installer sudah dijalankan dan tidak dibatalkan."
+    if job.get("launch_attempted"):
+        return (
+            "Peluncuran installer sudah dicoba, tetapi status mulainya tidak dapat dipastikan. "
+            "Bot tidak menjalankan ulang secara otomatis."
+        )
+    return "Installer belum dijalankan."
+
 
 async def finish_reinstall_job(
     application: Application,
@@ -5487,6 +5663,7 @@ async def finish_reinstall_job(
         )
     else:
         label = "Timeout" if status == "timeout" else "Gagal"
+        launch_notice = reinstall_failure_launch_notice(job)
         text = (
             "─────────────────────────────\n"
             f"  ❌  Reinstall {label}\n"
@@ -5500,7 +5677,7 @@ async def finish_reinstall_job(
             "  • Periksa VPS melalui console/VNC.\n"
             "  • Buka /jobs untuk detail dan status terbaru.\n"
             "  • Data VPS tetap tersimpan.\n\n"
-            "  Installer yang sudah berjalan tidak dibatalkan.\n"
+            f"  {launch_notice}\n"
             "─────────────────────────────"
         )
     await edit_job_progress(application, job_id, text)
@@ -5594,6 +5771,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                         verification=detected_os,
                     )
                     return
+                final_access = {}
                 verified_port, access_error = await asyncio.to_thread(
                     find_working_ssh_port_sync,
                     vps_ip,
@@ -5601,6 +5779,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     WINDOWS_INSTALL_PASSWORD,
                     "windows",
                     preferred_port=old_port,
+                    details=final_access,
                 )
                 if not verified_port:
                     await finish_reinstall_job(
@@ -5612,7 +5791,11 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     )
                     return
                 current = update_reinstall_job(
-                    job_id, verified_ssh_port=verified_port
+                    job_id,
+                    verified_ssh_port=verified_port,
+                    final_ssh_host_key_sha256=final_access.get(
+                        "ssh_host_key_sha256", ""
+                    ),
                 ) or current
                 update_vps_credentials_after_reinstall(current, verified_port)
                 await finish_reinstall_job(
@@ -5646,6 +5829,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                         verification=detected_os,
                     )
                     return
+                final_access = {}
                 verified_port, access_error = await asyncio.to_thread(
                     find_working_ssh_port_sync,
                     vps_ip,
@@ -5653,6 +5837,7 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     LINUX_INSTALL_PASSWORD,
                     "linux",
                     preferred_port=old_port,
+                    details=final_access,
                 )
                 if not verified_port:
                     await finish_reinstall_job(
@@ -5664,7 +5849,11 @@ async def monitor_reinstall_job(application: Application, job_id: str, recovered
                     )
                     return
                 current = update_reinstall_job(
-                    job_id, verified_ssh_port=verified_port
+                    job_id,
+                    verified_ssh_port=verified_port,
+                    final_ssh_host_key_sha256=final_access.get(
+                        "ssh_host_key_sha256", ""
+                    ),
                 ) or current
                 update_vps_credentials_after_reinstall(current, verified_port)
                 await finish_reinstall_job(
@@ -5750,6 +5939,23 @@ async def process_reinstall_job(application: Application, job_id: str, data=None
 
         loop = asyncio.get_running_loop()
         stage_progress = {"downloading": 15, "launching": 25}
+        original_port = int(data.get("vps_port") or FALLBACK_SSH_PORT)
+
+        def preflight_callback(verified_data: dict) -> None:
+            persist_reinstall_preflight_endpoint(
+                int(job["user_id"]), original_port, verified_data
+            )
+            updated = update_reinstall_job(
+                job_id,
+                vps_port=int(verified_data["vps_port"]),
+                preflight_verified=True,
+            )
+            if not updated:
+                raise RuntimeError("job hilang saat menyimpan hasil preflight")
+
+        def launch_attempt_callback() -> None:
+            if not update_reinstall_job(job_id, launch_attempted=True):
+                raise RuntimeError("job hilang sebelum peluncuran installer")
 
         def stage_callback(stage: str) -> None:
             progress = stage_progress.get(stage)
@@ -5765,7 +5971,13 @@ async def process_reinstall_job(application: Application, job_id: str, data=None
                 logger.warning("Progress update delayed for job %s: %s", job_id, exc)
 
         try:
-            ok, result = await asyncio.to_thread(launch_reinstall_sync, data, stage_callback)
+            ok, result = await asyncio.to_thread(
+                launch_reinstall_sync,
+                data,
+                stage_callback,
+                preflight_callback,
+                launch_attempt_callback,
+            )
         finally:
             # The persistent VPS bucket remains the source of truth; do not retain
             # another plaintext password in this long-lived background task.
@@ -5774,7 +5986,13 @@ async def process_reinstall_job(application: Application, job_id: str, data=None
             await finish_reinstall_job(application, job_id, "failed", result)
             return
 
-        update_reinstall_job(job_id, status="monitoring", progress=30, target_pid=result)
+        update_reinstall_job(
+            job_id,
+            status="monitoring",
+            progress=30,
+            target_pid=result,
+            installer_launched=True,
+        )
         await monitor_reinstall_job(application, job_id)
 
 
