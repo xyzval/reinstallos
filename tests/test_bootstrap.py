@@ -399,6 +399,16 @@ class BootstrapTests(unittest.TestCase):
             bot.reinstall_failure_launch_notice({"installer_launched": True}),
             "Installer sudah dijalankan dan tidak dibatalkan.",
         )
+        self.assertIn(
+            "status mulainya tidak dapat dipastikan",
+            bot.reinstall_failure_launch_notice(
+                {"progress": 55, "target_pid": "30970"}
+            ),
+        )
+        self.assertEqual(
+            bot.reinstall_failure_launch_notice({"progress": 5}),
+            "Installer belum dijalankan.",
+        )
 
     def test_saved_key_remains_a_connection_fallback(self):
         private_path, _ = bot.ensure_user_bootstrap_key(1001)

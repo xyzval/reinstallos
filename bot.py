@@ -5565,7 +5565,12 @@ def reinstall_failure_launch_notice(job: dict) -> str:
     """Describe launch state without claiming more certainty than persisted facts."""
     if job.get("installer_launched"):
         return "Installer sudah dijalankan dan tidak dibatalkan."
-    if job.get("launch_attempted"):
+    legacy_attempt = (
+        "launch_attempted" not in job
+        and "installer_launched" not in job
+        and (job.get("target_pid") or int(job.get("progress") or 0) >= 25)
+    )
+    if job.get("launch_attempted") or legacy_attempt:
         return (
             "Peluncuran installer sudah dicoba, tetapi status mulainya tidak dapat dipastikan. "
             "Bot tidak menjalankan ulang secara otomatis."
